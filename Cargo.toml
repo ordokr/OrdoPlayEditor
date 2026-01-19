@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ordoplay_editor_app",
+    "crates/ordoplay_editor_graph",
+    "crates/ordoplay_editor_sequencer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ordokr/OrdoPlayEditor"
+rust-version = "1.80.0"
+
+[workspace.lints.clippy]
+doc_markdown = "warn"
+manual_let_else = "warn"
+match_same_arms = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+semicolon_if_nothing_returned = "warn"
+type_complexity = "allow"
+undocumented_unsafe_blocks = "warn"
+unwrap_or_default = "warn"
+needless_lifetimes = "allow"
+too_many_arguments = "allow"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+# Note: unsafe_code needed for wgpu 0.23 render pass lifetime workaround
+unsafe_code = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_qualifications = "warn"
+
+[workspace.dependencies]
+# Editor-specific crates
+ordoplay_editor_graph = { path = "crates/ordoplay_editor_graph" }
+ordoplay_editor_sequencer = { path = "crates/ordoplay_editor_sequencer" }
+
+# UI Framework
+egui = "0.30"
+egui_dock = "0.15"
+egui-wgpu = "0.30"
+egui-winit = "0.30"
+
+# Windowing and Graphics
+winit = "0.30"
+pollster = "0.4"
+# Note: wgpu is used via egui-wgpu's re-export to ensure version compatibility
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ron = "0.9"
+bincode = "1.3"
+
+# Utilities
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+indexmap = { version = "2.0", features = ["serde"] }
+
+# Async
+tokio = { version = "1.0", features = ["rt-multi-thread", "sync"] }
+futures = "0.3"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

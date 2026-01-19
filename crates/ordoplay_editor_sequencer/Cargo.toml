@@ -1,0 +1,23 @@
+[package]
+name = "ordoplay_editor_sequencer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Timeline/sequencer for OrdoPlay Editor - cinematics, gameplay, audio"
+
+[dependencies]
+# UI
+egui.workspace = true
+
+# Serialization
+serde.workspace = true
+ron.workspace = true
+
+# Utilities
+uuid.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "ordoplay_editor_graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Node graph framework for OrdoPlay Editor - materials, gameplay, animation, VFX"
+
+[dependencies]
+# UI
+egui.workspace = true
+
+# Serialization
+serde.workspace = true
+ron.workspace = true
+
+# Utilities
+uuid.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

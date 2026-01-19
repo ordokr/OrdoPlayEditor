@@ -1,0 +1,48 @@
+[package]
+name = "ordoplay_editor_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OrdoPlay Game Engine Editor - SOTA game development environment"
+default-run = "ordoplay_editor"
+
+[[bin]]
+name = "ordoplay_editor"
+path = "src/main.rs"
+
+[dependencies]
+# Editor crates
+ordoplay_editor_graph.workspace = true
+ordoplay_editor_sequencer.workspace = true
+
+# UI Framework
+egui.workspace = true
+egui_dock.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+
+# Windowing and Graphics
+winit.workspace = true
+pollster.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+ron.workspace = true
+bincode.workspace = true
+
+# Utilities
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+bytemuck = { version = "1.14", features = ["derive"] }
+indexmap.workspace = true
+
+# Async
+tokio.workspace = true
+
+[lints]
+workspace = true
