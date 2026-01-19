@@ -64,6 +64,22 @@ impl Default for TransformData {
     }
 }
 
+impl From<&Transform> for TransformData {
+    fn from(transform: &Transform) -> Self {
+        Self {
+            position: transform.position,
+            rotation: [transform.rotation[0], transform.rotation[1], transform.rotation[2], 1.0],
+            scale: transform.scale,
+        }
+    }
+}
+
+impl From<Transform> for TransformData {
+    fn from(transform: Transform) -> Self {
+        Self::from(&transform)
+    }
+}
+
 /// Command to transform entities
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformCommand {

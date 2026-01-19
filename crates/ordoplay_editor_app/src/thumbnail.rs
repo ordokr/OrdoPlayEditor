@@ -363,8 +363,7 @@ async fn generate_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
 /// Generate thumbnail for standard image formats
 async fn generate_image_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
     // Read file
-    let data = tokio::fs::read(path)
-        .await
+    let data = std::fs::read(path)
         .map_err(|e| ThumbnailError::IoError(e.to_string()))?;
 
     // Decode image
@@ -384,8 +383,7 @@ async fn generate_image_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
 
 /// Generate thumbnail for HDR/EXR images
 async fn generate_hdr_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
-    let data = tokio::fs::read(path)
-        .await
+    let data = std::fs::read(path)
         .map_err(|e| ThumbnailError::IoError(e.to_string()))?;
 
     let img =
@@ -486,14 +484,14 @@ fn create_texture(
         .collect();
 
     queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
+        wgpu::ImageCopyTexture {
             texture: &texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &pixels,
-        wgpu::TexelCopyBufferLayout {
+        wgpu::ImageDataLayout {
             offset: 0,
             bytes_per_row: Some(4 * image.width() as u32),
             rows_per_image: Some(image.height() as u32),

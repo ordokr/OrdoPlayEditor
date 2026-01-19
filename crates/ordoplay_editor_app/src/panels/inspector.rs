@@ -9,6 +9,8 @@ pub struct InspectorPanel {
     expanded_sections: std::collections::HashSet<String>,
     /// Temporary edit values (for tracking changes)
     editing_transform: Option<(EntityId, Transform)>,
+    /// Start of the current transform edit (for undo)
+    editing_transform_start: Option<(EntityId, Transform)>,
     /// Entity name being edited
     editing_name: Option<(EntityId, String)>,
     /// Multi-edit transform buffer
@@ -27,6 +29,7 @@ impl InspectorPanel {
         Self {
             expanded_sections: expanded,
             editing_transform: None,
+            editing_transform_start: None,
             editing_name: None,
             multi_transform: Transform::default(),
             multi_selection: Vec::new(),
@@ -132,6 +135,7 @@ impl InspectorPanel {
         // Reset if entity changed
         if edit_transform.0 != entity_id {
             *edit_transform = (entity_id, current_transform.clone());
+            self.editing_transform_start = None;
         }
 
         let header = egui::CollapsingHeader::new("Transform")
@@ -142,13 +146,16 @@ impl InspectorPanel {
                 // Position
                 ui.horizontal(|ui| {
                     ui.label("Position");
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.position[0]).speed(0.1).prefix("X: ")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.position[0]).speed(0.1).prefix("X: "));
+                    if response.changed() {
                         changed = true;
                     }
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.position[1]).speed(0.1).prefix("Y: ")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.position[1]).speed(0.1).prefix("Y: "));
+                    if response.changed() {
                         changed = true;
                     }
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.position[2]).speed(0.1).prefix("Z: ")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.position[2]).speed(0.1).prefix("Z: "));
+                    if response.changed() {
                         changed = true;
                     }
                 });
@@ -156,13 +163,16 @@ impl InspectorPanel {
                 // Rotation
                 ui.horizontal(|ui| {
                     ui.label("Rotation");
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.rotation[0]).speed(1.0).prefix("X: ").suffix("°")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.rotation[0]).speed(1.0).prefix("X: ").suffix("°"));
+                    if response.changed() {
                         changed = true;
                     }
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.rotation[1]).speed(1.0).prefix("Y: ").suffix("°")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.rotation[1]).speed(1.0).prefix("Y: ").suffix("°"));
+                    if response.changed() {
                         changed = true;
                     }
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.rotation[2]).speed(1.0).prefix("Z: ").suffix("°")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.rotation[2]).speed(1.0).prefix("Z: ").suffix("°"));
+                    if response.changed() {
                         changed = true;
                     }
                 });
@@ -170,19 +180,25 @@ impl InspectorPanel {
                 // Scale
                 ui.horizontal(|ui| {
                     ui.label("Scale   ");
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.scale[0]).speed(0.01).prefix("X: ")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.scale[0]).speed(0.01).prefix("X: "));
+                    if response.changed() {
                         changed = true;
                     }
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.scale[1]).speed(0.01).prefix("Y: ")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.scale[1]).speed(0.01).prefix("Y: "));
+                    if response.changed() {
                         changed = true;
                     }
-                    if ui.add(egui::DragValue::new(&mut edit_transform.1.scale[2]).speed(0.01).prefix("Z: ")).changed() {
+                    let response = ui.add(egui::DragValue::new(&mut edit_transform.1.scale[2]).speed(0.01).prefix("Z: "));
+                    if response.changed() {
                         changed = true;
                     }
                 });
 
                 // Commit changes when dragging ends
                 if changed {
+                    if self.editing_transform_start.is_none() {
+                        self.editing_transform_start = Some((entity_id, current_transform.clone()));
+                    }
                     // Apply live updates for visual feedback
                     if let Some(data) = state.scene.get_mut(&entity_id) {
                         data.transform = edit_transform.1.clone();
@@ -190,8 +206,18 @@ impl InspectorPanel {
                 }
 
                 // Check for drag end to commit to undo history
-                if ui.input(|i| i.pointer.any_released()) && edit_transform.1 != *current_transform {
-                    state.set_transform(entity_id, edit_transform.1.clone(), "Transform entity");
+                let commit = ui.input(|i| i.pointer.any_released() || i.key_pressed(egui::Key::Enter));
+                if commit {
+                    if let Some((start_id, start_transform)) = self.editing_transform_start.take() {
+                        if start_id == entity_id && edit_transform.1 != start_transform {
+                            state.set_transform_with_before(
+                                entity_id,
+                                start_transform,
+                                edit_transform.1.clone(),
+                                "Transform entity",
+                            );
+                        }
+                    }
                 }
             });
 

@@ -4,7 +4,10 @@
 //! This module contains the core editor state including selection,
 //! undo/redo history, and scene management.
 
-use crate::commands::{EditorCommand, PropertyEditSnapshot, TransformData};
+use crate::commands::{
+    DeleteCommand, DuplicateCommand, EditorCommand, PropertyEditSnapshot, TransformCommand,
+    TransformData,
+};
 use crate::history::{History, HistoryError, Operation, OperationGroup, StateSnapshot};
 use crate::panel_types::PanelType;
 use crate::tools::GizmoMode;
@@ -476,7 +479,7 @@ impl EditorState {
         }
 
         let ids = self.selection.entities.clone();
-        self.delete_entities(&ids);
+        self.delete_entities_with_command(&ids);
     }
 
     /// Duplicate selected entities
@@ -486,13 +489,7 @@ impl EditorState {
         }
 
         let ids = self.selection.entities.clone();
-        let new_ids = self.duplicate_entities(&ids);
-        if !new_ids.is_empty() {
-            self.selection.clear();
-            for id in new_ids {
-                self.selection.add(id);
-            }
-        }
+        let _ = self.duplicate_entities(&ids);
     }
 
     /// Mark the scene as modified
@@ -502,35 +499,36 @@ impl EditorState {
 
     /// Set entity transform with undo support
     pub fn set_transform(&mut self, entity_id: EntityId, new_transform: Transform, description: &str) {
-        // Get old transform for undo
         let old_transform = match self.scene.get(&entity_id) {
             Some(data) => data.transform.clone(),
             None => return,
         };
 
-        // Don't create operation if nothing changed
-        if old_transform == new_transform {
+        self.set_transform_with_before(entity_id, old_transform, new_transform, description);
+    }
+
+    /// Set entity transform with a provided "before" snapshot
+    pub fn set_transform_with_before(
+        &mut self,
+        entity_id: EntityId,
+        before: Transform,
+        after: Transform,
+        description: &str,
+    ) {
+        if before == after {
             return;
         }
 
-        // Apply the change
-        if let Some(data) = self.scene.get_mut(&entity_id) {
-            data.transform = new_transform.clone();
-        }
+        let command = TransformCommand::new(
+            vec![entity_id],
+            vec![TransformData::from(before)],
+            vec![TransformData::from(after)],
+            description,
+        );
 
-        // Create undo operation
-        if let (Ok(before), Ok(after)) = (
-            StateSnapshot::from_value(&(entity_id, old_transform)),
-            StateSnapshot::from_value(&(entity_id, new_transform)),
-        ) {
-            let op_id = self.history.begin_operation(description);
-            let operation = Operation::new(op_id, description.to_string(), before, after);
-            let mut group = OperationGroup::new(op_id, description.to_string());
-            group.add_operation(operation);
-            let _ = self.history.commit(group);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Transform command failed: {}", err);
         }
-
-        self.dirty = true;
     }
 
     /// Set entity name with undo support
@@ -590,81 +588,41 @@ impl EditorState {
         Ok(())
     }
 
-    /// Delete a set of entities (including their descendants) with undo support
+    /// Delete a set of entities (including their descendants)
     pub fn delete_entities(&mut self, ids: &[EntityId]) {
         let to_remove = self.collect_with_descendants(ids);
         if to_remove.is_empty() {
             return;
         }
 
-        let mut removed_entities = Vec::new();
-        for id in &to_remove {
-            if let Some(entity) = self.scene.get(id).cloned() {
-                removed_entities.push((*id, entity));
-            }
-        }
-
         self.remove_entities_by_id(&to_remove);
         self.selection.clear();
         self.dirty = true;
+    }
 
-        let description = "Delete Entities";
-        if let (Ok(before), Ok(after)) = (
-            StateSnapshot::from_value(&removed_entities),
-            StateSnapshot::from_value(&to_remove),
-        ) {
-            let op_id = self.history.begin_operation(description);
-            let operation = Operation::new(op_id, description.to_string(), before, after);
-            let mut group = OperationGroup::new(op_id, description.to_string());
-            group.add_operation(operation);
-            let _ = self.history.commit(group);
+    /// Delete a set of entities via commands (undo/redo)
+    pub fn delete_entities_with_command(&mut self, ids: &[EntityId]) {
+        if ids.is_empty() {
+            return;
+        }
+
+        let command = DeleteCommand::new(ids.to_vec());
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Delete command failed: {}", err);
         }
     }
 
     /// Duplicate a set of entities with undo support
     pub fn duplicate_entities(&mut self, ids: &[EntityId]) -> Vec<EntityId> {
-        let mut new_entities = Vec::new();
-        let mut new_ids = Vec::new();
-
-        for id in ids {
-            let Some(original) = self.scene.get(id).cloned() else {
-                continue;
-            };
-
-            let mut duplicate = original.clone();
-            duplicate.name = format!("{} (Copy)", original.name);
-            duplicate.children = Vec::new();
-
-            let new_id = EntityId::new();
-            if let Some(parent_id) = duplicate.parent {
-                if let Some(parent) = self.scene.get_mut(&parent_id) {
-                    if !parent.children.contains(&new_id) {
-                        parent.children.push(new_id);
-                    }
-                }
-            }
-
-            self.scene.entities.insert(new_id, duplicate.clone());
-            new_entities.push((new_id, duplicate));
-            new_ids.push(new_id);
-        }
-
-        if new_ids.is_empty() {
+        if ids.is_empty() {
             return Vec::new();
         }
 
-        self.dirty = true;
-
-        let description = "Duplicate Entities";
-        if let (Ok(before), Ok(after)) = (
-            StateSnapshot::from_value(&new_ids),
-            StateSnapshot::from_value(&new_entities),
-        ) {
-            let op_id = self.history.begin_operation(description);
-            let operation = Operation::new(op_id, description.to_string(), before, after);
-            let mut group = OperationGroup::new(op_id, description.to_string());
-            group.add_operation(operation);
-            let _ = self.history.commit(group);
+        let command = DuplicateCommand::new(ids.to_vec());
+        let new_ids = command.new_entities.clone();
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Duplicate command failed: {}", err);
+            return Vec::new();
         }
 
         new_ids
@@ -940,6 +898,7 @@ impl EditorState {
             return;
         }
 
+        let mut ids = Vec::new();
         let mut before = Vec::new();
         let mut after = Vec::new();
 
@@ -947,32 +906,22 @@ impl EditorState {
             let Some(entity) = self.scene.get(&entity_id) else {
                 continue;
             };
-            before.push((entity_id, entity.transform.clone()));
-            after.push((entity_id, new_transform.clone()));
+            if entity.transform == new_transform {
+                continue;
+            }
+            ids.push(entity_id);
+            before.push(TransformData::from(entity.transform.clone()));
+            after.push(TransformData::from(new_transform));
         }
 
-        if before.is_empty() || before == after {
+        if ids.is_empty() {
             return;
         }
 
-        for (entity_id, transform) in after.iter() {
-            if let Some(entity) = self.scene.get_mut(entity_id) {
-                entity.transform = transform.clone();
-            }
+        let command = TransformCommand::new(ids, before, after, description);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Bulk transform failed: {}", err);
         }
-
-        if let (Ok(before_snapshot), Ok(after_snapshot)) = (
-            StateSnapshot::from_value(&before),
-            StateSnapshot::from_value(&after),
-        ) {
-            let op_id = self.history.begin_operation(description);
-            let operation = Operation::new(op_id, description.to_string(), before_snapshot, after_snapshot);
-            let mut group = OperationGroup::new(op_id, description.to_string());
-            group.add_operation(operation);
-            let _ = self.history.commit(group);
-        }
-
-        self.dirty = true;
     }
 }
 

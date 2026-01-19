@@ -619,7 +619,7 @@ impl ViewportPanel {
                             GizmoMode::Rotate => "Rotate entity",
                             GizmoMode::Scale => "Scale entity",
                         };
-                        state.set_transform(entity_id, new_transform, description);
+                        state.set_transform_with_before(entity_id, start_transform, new_transform, description);
                     }
                 }
             }

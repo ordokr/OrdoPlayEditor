@@ -261,7 +261,7 @@ impl HierarchyPanel {
     }
 
     fn delete_entity(&mut self, state: &mut EditorState, entity_id: EntityId) {
-        state.delete_entities(&[entity_id]);
+        state.delete_entities_with_command(&[entity_id]);
     }
 
     fn duplicate_entity(&mut self, state: &mut EditorState, entity_id: EntityId) {

@@ -118,8 +118,7 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
             PanelType::Console => self.console.ui(ui, self.state),
             PanelType::Profiler => self.profiler.ui(ui, self.state),
             PanelType::MaterialGraph => {
-                self.material_graph_state
-                    .ui_with_registry(ui, self.material_graph, Some(self.material_registry));
+                self.material_graph_ui(ui);
             }
             PanelType::GameplayGraph => {
                 self.gameplay_graph_state
@@ -137,6 +136,122 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
 
     fn on_close(&mut self, _tab: &mut Self::Tab) -> bool {
         true // Allow closing
+    }
+}
+
+impl<'a> EditorTabViewer<'a> {
+    fn material_graph_ui(&mut self, ui: &mut egui::Ui) {
+        egui::SidePanel::right("material_preview_panel")
+            .resizable(false)
+            .default_width(260.0)
+            .min_width(220.0)
+            .show_inside(ui, |ui| {
+                self.material_preview_panel(ui);
+            });
+
+        self.material_graph_state
+            .ui_with_registry(ui, self.material_graph, Some(self.material_registry));
+    }
+
+    fn material_preview_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Material Preview");
+        ui.add_space(4.0);
+
+        let preview_color = self.material_preview_color();
+        let preview_height = 140.0;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), preview_height),
+            egui::Sense::hover(),
+        );
+        ui.painter()
+            .rect_filled(rect, 8.0, preview_color);
+        ui.painter()
+            .rect_stroke(rect, 8.0, egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+
+        ui.add_space(6.0);
+        ui.label(format!(
+            "Nodes: {} | Connections: {}",
+            self.material_graph.node_count(),
+            self.material_graph.connection_count()
+        ));
+        ui.label(format!(
+            "Selected Nodes: {}",
+            self.material_graph_state.selected_nodes.len()
+        ));
+
+        if let Some(output_name) = self.material_output_name() {
+            ui.label(format!("Output: {}", output_name));
+        } else {
+            ui.label("Output: None");
+        }
+
+        ui.separator();
+        ui.label("Graph Settings");
+        ui.checkbox(&mut self.material_graph_state.show_grid, "Show Grid");
+        ui.checkbox(&mut self.material_graph_state.show_minimap, "Show Minimap");
+        ui.checkbox(&mut self.material_graph_state.snap_to_grid, "Snap to Grid");
+        if self.material_graph_state.snap_to_grid {
+            ui.add(
+                egui::DragValue::new(&mut self.material_graph_state.snap_size)
+                    .range(5.0..=100.0)
+                    .speed(1.0)
+                    .suffix(" px"),
+            );
+        }
+
+        ui.separator();
+        ui.label("Selection");
+        let selected_nodes: Vec<_> = self
+            .material_graph_state
+            .selected_nodes
+            .iter()
+            .filter_map(|id| self.material_graph.node(*id))
+            .map(|node| node.name.clone())
+            .collect();
+
+        if selected_nodes.is_empty() {
+            ui.label("No nodes selected");
+        } else {
+            for name in selected_nodes.iter().take(6) {
+                ui.label(name);
+            }
+        }
+    }
+
+    fn material_output_name(&self) -> Option<String> {
+        self.material_graph
+            .nodes()
+            .find(|node| node.node_type == "material_output" || node.node_type == "unlit_output")
+            .map(|node| node.name.clone())
+    }
+
+    fn material_preview_color(&self) -> egui::Color32 {
+        let output_node = self
+            .material_graph
+            .nodes()
+            .find(|node| node.node_type == "material_output" || node.node_type == "unlit_output");
+
+        if let Some(node) = output_node {
+            let port_name = if node.node_type == "material_output" {
+                "Base Color"
+            } else {
+                "Color"
+            };
+
+            if let Some(port) = node.inputs.iter().find(|p| p.name == port_name) {
+                if let Some(ordoplay_editor_graph::port::PortValue::Color(color)) = &port.default_value {
+                    let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+                    return egui::Color32::from_rgba_unmultiplied(
+                        to_u8(color[0]),
+                        to_u8(color[1]),
+                        to_u8(color[2]),
+                        to_u8(color[3]),
+                    );
+                }
+            }
+        }
+
+        egui::Color32::from_rgb(70, 70, 80)
     }
 }
 
