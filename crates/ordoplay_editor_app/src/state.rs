@@ -4,11 +4,13 @@
 //! This module contains the core editor state including selection,
 //! undo/redo history, and scene management.
 
-use crate::history::{History, Operation, OperationGroup, OperationID, StateSnapshot};
+use crate::commands::{EditorCommand, PropertyEditSnapshot, TransformData};
+use crate::history::{History, HistoryError, Operation, OperationGroup, StateSnapshot};
+use crate::panel_types::PanelType;
 use crate::tools::GizmoMode;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -218,6 +220,11 @@ impl SceneData {
         id
     }
 
+    /// Insert an entity with a specific ID
+    pub fn insert_entity(&mut self, id: EntityId, data: EntityData) -> bool {
+        self.entities.insert(id, data).is_none()
+    }
+
     /// Get an entity by ID
     pub fn get(&self, id: &EntityId) -> Option<&EntityData> {
         self.entities.get(id)
@@ -283,6 +290,9 @@ pub struct EditorState {
 
     /// Recent scenes list
     pub recent_scenes: VecDeque<PathBuf>,
+
+    /// Panels requested to open
+    pending_panels: Vec<PanelType>,
 }
 
 impl EditorState {
@@ -328,6 +338,7 @@ impl EditorState {
             rotation_snap: 15.0,
             scale_snap: 0.1,
             recent_scenes: VecDeque::new(),
+            pending_panels: Vec::new(),
         }
     }
 
@@ -464,10 +475,8 @@ impl EditorState {
             return;
         }
 
-        // TODO: Create delete command with undo support
-        tracing::info!("Deleting {} entities", self.selection.len());
-        self.selection.clear();
-        self.dirty = true;
+        let ids = self.selection.entities.clone();
+        self.delete_entities(&ids);
     }
 
     /// Duplicate selected entities
@@ -476,9 +485,14 @@ impl EditorState {
             return;
         }
 
-        // TODO: Create duplicate command with undo support
-        tracing::info!("Duplicating {} entities", self.selection.len());
-        self.dirty = true;
+        let ids = self.selection.entities.clone();
+        let new_ids = self.duplicate_entities(&ids);
+        if !new_ids.is_empty() {
+            self.selection.clear();
+            for id in new_ids {
+                self.selection.add(id);
+            }
+        }
     }
 
     /// Mark the scene as modified
@@ -549,6 +563,423 @@ impl EditorState {
 
         self.dirty = true;
     }
+
+    /// Request a panel to be opened by the UI
+    pub fn request_panel_open(&mut self, panel: PanelType) {
+        self.pending_panels.push(panel);
+    }
+
+    /// Take pending panel open requests
+    pub fn take_pending_panels(&mut self) -> Vec<PanelType> {
+        std::mem::take(&mut self.pending_panels)
+    }
+
+    /// Undo the last operation and apply it to the scene
+    pub fn undo(&mut self) -> Result<(), HistoryError> {
+        let group = self.history.undo()?;
+        self.apply_operation_group(&group, HistoryDirection::Undo);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Redo the last operation and apply it to the scene
+    pub fn redo(&mut self) -> Result<(), HistoryError> {
+        let group = self.history.redo()?;
+        self.apply_operation_group(&group, HistoryDirection::Redo);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Delete a set of entities (including their descendants) with undo support
+    pub fn delete_entities(&mut self, ids: &[EntityId]) {
+        let to_remove = self.collect_with_descendants(ids);
+        if to_remove.is_empty() {
+            return;
+        }
+
+        let mut removed_entities = Vec::new();
+        for id in &to_remove {
+            if let Some(entity) = self.scene.get(id).cloned() {
+                removed_entities.push((*id, entity));
+            }
+        }
+
+        self.remove_entities_by_id(&to_remove);
+        self.selection.clear();
+        self.dirty = true;
+
+        let description = "Delete Entities";
+        if let (Ok(before), Ok(after)) = (
+            StateSnapshot::from_value(&removed_entities),
+            StateSnapshot::from_value(&to_remove),
+        ) {
+            let op_id = self.history.begin_operation(description);
+            let operation = Operation::new(op_id, description.to_string(), before, after);
+            let mut group = OperationGroup::new(op_id, description.to_string());
+            group.add_operation(operation);
+            let _ = self.history.commit(group);
+        }
+    }
+
+    /// Duplicate a set of entities with undo support
+    pub fn duplicate_entities(&mut self, ids: &[EntityId]) -> Vec<EntityId> {
+        let mut new_entities = Vec::new();
+        let mut new_ids = Vec::new();
+
+        for id in ids {
+            let Some(original) = self.scene.get(id).cloned() else {
+                continue;
+            };
+
+            let mut duplicate = original.clone();
+            duplicate.name = format!("{} (Copy)", original.name);
+            duplicate.children = Vec::new();
+
+            let new_id = EntityId::new();
+            if let Some(parent_id) = duplicate.parent {
+                if let Some(parent) = self.scene.get_mut(&parent_id) {
+                    if !parent.children.contains(&new_id) {
+                        parent.children.push(new_id);
+                    }
+                }
+            }
+
+            self.scene.entities.insert(new_id, duplicate.clone());
+            new_entities.push((new_id, duplicate));
+            new_ids.push(new_id);
+        }
+
+        if new_ids.is_empty() {
+            return Vec::new();
+        }
+
+        self.dirty = true;
+
+        let description = "Duplicate Entities";
+        if let (Ok(before), Ok(after)) = (
+            StateSnapshot::from_value(&new_ids),
+            StateSnapshot::from_value(&new_entities),
+        ) {
+            let op_id = self.history.begin_operation(description);
+            let operation = Operation::new(op_id, description.to_string(), before, after);
+            let mut group = OperationGroup::new(op_id, description.to_string());
+            group.add_operation(operation);
+            let _ = self.history.commit(group);
+        }
+
+        new_ids
+    }
+
+    fn apply_operation_group(&mut self, group: &OperationGroup, direction: HistoryDirection) {
+        let ops: Box<dyn Iterator<Item = &Operation>> = match direction {
+            HistoryDirection::Undo => Box::new(group.operations.iter().rev()),
+            HistoryDirection::Redo => Box::new(group.operations.iter()),
+        };
+
+        for operation in ops {
+            let snapshot = match direction {
+                HistoryDirection::Undo => &operation.before,
+                HistoryDirection::Redo => &operation.after,
+            };
+            let _ = self.apply_snapshot(snapshot);
+        }
+    }
+
+    fn apply_snapshot(&mut self, snapshot: &StateSnapshot) -> bool {
+        if snapshot.data.is_empty() {
+            return false;
+        }
+
+        if let Ok((entity_id, transform)) = snapshot.to_value::<(EntityId, Transform)>() {
+            if let Some(entity) = self.scene.get_mut(&entity_id) {
+                entity.transform = transform;
+                return true;
+            }
+        }
+
+        if let Ok(pairs) = snapshot.to_value::<Vec<(EntityId, Transform)>>() {
+            if !pairs.is_empty() {
+                self.apply_transform_pairs(pairs);
+                return true;
+            }
+        }
+
+        if let Ok(pairs) = snapshot.to_value::<Vec<(EntityId, TransformData)>>() {
+            if !pairs.is_empty() {
+                self.apply_transform_data_pairs(pairs);
+                return true;
+            }
+        }
+
+        if let Ok((entity_id, name)) = snapshot.to_value::<(EntityId, String)>() {
+            if let Some(entity) = self.scene.get_mut(&entity_id) {
+                entity.name = name;
+                return true;
+            }
+        }
+
+        if let Ok(edit) = snapshot.to_value::<PropertyEditSnapshot>() {
+            if self.apply_property_snapshot(edit) {
+                return true;
+            }
+        }
+
+        if let Ok(pairs) = snapshot.to_value::<Vec<(EntityId, Option<EntityId>)>>() {
+            if !pairs.is_empty() {
+                for (entity_id, parent) in pairs {
+                    self.set_entity_parent(entity_id, parent);
+                }
+                return true;
+            }
+        }
+
+        if let Ok(entities) = snapshot.to_value::<Vec<(EntityId, EntityData)>>() {
+            if !entities.is_empty() {
+                self.restore_entities(entities);
+                return true;
+            }
+        }
+
+        if let Ok(ids) = snapshot.to_value::<Vec<EntityId>>() {
+            if !ids.is_empty() {
+                self.remove_entities_by_id(&ids);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub(crate) fn collect_with_descendants(&self, ids: &[EntityId]) -> Vec<EntityId> {
+        let mut visited = HashSet::new();
+        let mut collected = Vec::new();
+
+        for id in ids {
+            self.collect_descendants(*id, &mut collected, &mut visited);
+        }
+
+        collected
+    }
+
+    fn collect_descendants(
+        &self,
+        id: EntityId,
+        collected: &mut Vec<EntityId>,
+        visited: &mut HashSet<EntityId>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+
+        collected.push(id);
+
+        if let Some(entity) = self.scene.get(&id) {
+            for child_id in &entity.children {
+                self.collect_descendants(*child_id, collected, visited);
+            }
+        }
+    }
+
+    fn remove_entities_by_id(&mut self, ids: &[EntityId]) {
+        for id in ids {
+            if let Some(entity) = self.scene.remove(id) {
+                if let Some(parent_id) = entity.parent {
+                    if let Some(parent) = self.scene.get_mut(&parent_id) {
+                        parent.children.retain(|child| child != id);
+                    }
+                }
+            }
+            self.selection.remove(id);
+        }
+    }
+
+    fn restore_entities(&mut self, entities: Vec<(EntityId, EntityData)>) {
+        for (id, data) in entities.iter() {
+            self.scene.entities.insert(*id, data.clone());
+        }
+
+        for (id, data) in entities {
+            self.attach_to_parent(id, data.parent);
+        }
+    }
+
+    fn apply_transform_pairs(&mut self, pairs: Vec<(EntityId, Transform)>) {
+        for (entity_id, transform) in pairs {
+            if let Some(entity) = self.scene.get_mut(&entity_id) {
+                entity.transform = transform;
+            }
+        }
+    }
+
+    fn apply_transform_data_pairs(&mut self, pairs: Vec<(EntityId, TransformData)>) {
+        for (entity_id, transform) in pairs {
+            if let Some(entity) = self.scene.get_mut(&entity_id) {
+                entity.transform = Transform {
+                    position: transform.position,
+                    rotation: [transform.rotation[0], transform.rotation[1], transform.rotation[2]],
+                    scale: transform.scale,
+                };
+            }
+        }
+    }
+
+    fn apply_property_snapshot(&mut self, snapshot: PropertyEditSnapshot) -> bool {
+        let Some(entity) = self.scene.get_mut(&snapshot.entity) else {
+            return false;
+        };
+
+        let component = snapshot.component_type.as_str();
+        let field = snapshot.field_path.as_str();
+
+        if component.eq_ignore_ascii_case("Transform") || component.eq_ignore_ascii_case("transform") {
+            if let Ok(value) = bincode::deserialize::<[f32; 3]>(&snapshot.value) {
+                match field {
+                    "position" => entity.transform.position = value,
+                    "rotation" => entity.transform.rotation = value,
+                    "scale" => entity.transform.scale = value,
+                    "position.x" => entity.transform.position[0] = value[0],
+                    "position.y" => entity.transform.position[1] = value[1],
+                    "position.z" => entity.transform.position[2] = value[2],
+                    "rotation.x" => entity.transform.rotation[0] = value[0],
+                    "rotation.y" => entity.transform.rotation[1] = value[1],
+                    "rotation.z" => entity.transform.rotation[2] = value[2],
+                    "scale.x" => entity.transform.scale[0] = value[0],
+                    "scale.y" => entity.transform.scale[1] = value[1],
+                    "scale.z" => entity.transform.scale[2] = value[2],
+                    _ => return false,
+                }
+                return true;
+            }
+
+            if let Ok(value) = bincode::deserialize::<f32>(&snapshot.value) {
+                match field {
+                    "position.x" => entity.transform.position[0] = value,
+                    "position.y" => entity.transform.position[1] = value,
+                    "position.z" => entity.transform.position[2] = value,
+                    "rotation.x" => entity.transform.rotation[0] = value,
+                    "rotation.y" => entity.transform.rotation[1] = value,
+                    "rotation.z" => entity.transform.rotation[2] = value,
+                    "scale.x" => entity.transform.scale[0] = value,
+                    "scale.y" => entity.transform.scale[1] = value,
+                    "scale.z" => entity.transform.scale[2] = value,
+                    _ => return false,
+                }
+                return true;
+            }
+        }
+
+        if component.eq_ignore_ascii_case("Entity") && field.eq_ignore_ascii_case("name") {
+            if let Ok(name) = bincode::deserialize::<String>(&snapshot.value) {
+                entity.name = name;
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn set_entity_parent(&mut self, entity_id: EntityId, new_parent: Option<EntityId>) {
+        // First pass: check if entity exists and get old parent
+        let old_parent = {
+            let Some(entity) = self.scene.get(&entity_id) else {
+                return;
+            };
+            if entity.parent == new_parent {
+                return;
+            }
+            entity.parent
+        };
+
+        // Second pass: remove from old parent's children
+        if let Some(old_parent_id) = old_parent {
+            if let Some(parent) = self.scene.get_mut(&old_parent_id) {
+                parent.children.retain(|id| id != &entity_id);
+            }
+        }
+
+        // Third pass: update entity's parent reference
+        if let Some(entity) = self.scene.get_mut(&entity_id) {
+            entity.parent = new_parent;
+        }
+
+        // Fourth pass: add to new parent's children
+        self.attach_to_parent(entity_id, new_parent);
+    }
+
+    fn attach_to_parent(&mut self, entity_id: EntityId, parent_id: Option<EntityId>) {
+        if let Some(parent_id) = parent_id {
+            if let Some(parent) = self.scene.get_mut(&parent_id) {
+                if !parent.children.contains(&entity_id) {
+                    parent.children.push(entity_id);
+                }
+            }
+        }
+    }
+
+    /// Execute an editor command and commit its undo/redo snapshot
+    pub fn execute_command<C: EditorCommand>(&mut self, command: &C) -> Result<(), crate::commands::CommandError> {
+        let (before, after) = command.snapshots(self)?;
+        let op_id = self.history.begin_operation(command.description());
+        command.execute(self)?;
+
+        let operation = Operation::new(op_id, command.description().to_string(), before, after);
+        let mut group = OperationGroup::new(op_id, command.description().to_string());
+        group.add_operation(operation);
+        self.history.commit(group)?;
+        Ok(())
+    }
+
+    /// Set transforms for multiple entities as a single undo operation
+    pub fn set_transforms_bulk(
+        &mut self,
+        entities: &[EntityId],
+        transforms: &[Transform],
+        description: &str,
+    ) {
+        if entities.is_empty() || entities.len() != transforms.len() {
+            return;
+        }
+
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+
+        for (entity_id, new_transform) in entities.iter().copied().zip(transforms.iter().cloned()) {
+            let Some(entity) = self.scene.get(&entity_id) else {
+                continue;
+            };
+            before.push((entity_id, entity.transform.clone()));
+            after.push((entity_id, new_transform.clone()));
+        }
+
+        if before.is_empty() || before == after {
+            return;
+        }
+
+        for (entity_id, transform) in after.iter() {
+            if let Some(entity) = self.scene.get_mut(entity_id) {
+                entity.transform = transform.clone();
+            }
+        }
+
+        if let (Ok(before_snapshot), Ok(after_snapshot)) = (
+            StateSnapshot::from_value(&before),
+            StateSnapshot::from_value(&after),
+        ) {
+            let op_id = self.history.begin_operation(description);
+            let operation = Operation::new(op_id, description.to_string(), before_snapshot, after_snapshot);
+            let mut group = OperationGroup::new(op_id, description.to_string());
+            group.add_operation(operation);
+            let _ = self.history.commit(group);
+        }
+
+        self.dirty = true;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HistoryDirection {
+    Undo,
+    Redo,
 }
 
 impl Default for EditorState {

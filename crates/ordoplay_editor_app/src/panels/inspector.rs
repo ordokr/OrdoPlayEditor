@@ -11,6 +11,10 @@ pub struct InspectorPanel {
     editing_transform: Option<(EntityId, Transform)>,
     /// Entity name being edited
     editing_name: Option<(EntityId, String)>,
+    /// Multi-edit transform buffer
+    multi_transform: Transform,
+    /// Cached selection for multi-edit
+    multi_selection: Vec<EntityId>,
 }
 
 impl InspectorPanel {
@@ -24,6 +28,8 @@ impl InspectorPanel {
             expanded_sections: expanded,
             editing_transform: None,
             editing_name: None,
+            multi_transform: Transform::default(),
+            multi_selection: Vec::new(),
         }
     }
 
@@ -40,8 +46,7 @@ impl InspectorPanel {
         if selection_count > 1 {
             ui.label(format!("{} entities selected", selection_count));
             ui.separator();
-            // TODO: Multi-edit UI
-            ui.label("Multi-editing not yet implemented");
+            self.multi_edit_ui(ui, state);
             return;
         }
 
@@ -254,6 +259,153 @@ impl InspectorPanel {
                 // TODO: Show component picker popup
             }
         });
+    }
+
+    fn multi_edit_ui(&mut self, ui: &mut egui::Ui, state: &mut EditorState) {
+        self.sync_multi_transform(state);
+
+        let all_active = state.selection.entities.iter().all(|id| {
+            state.scene.get(id).map(|e| e.active).unwrap_or(false)
+        });
+        let all_inactive = state.selection.entities.iter().all(|id| {
+            state.scene.get(id).map(|e| !e.active).unwrap_or(false)
+        });
+        let all_static = state.selection.entities.iter().all(|id| {
+            state.scene.get(id).map(|e| e.is_static).unwrap_or(false)
+        });
+        let all_dynamic = state.selection.entities.iter().all(|id| {
+            state.scene.get(id).map(|e| !e.is_static).unwrap_or(false)
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Active:");
+            if ui.add_enabled(!all_active, egui::Button::new("Activate All")).clicked() {
+                self.set_active_for_selection(state, true);
+            }
+            if ui.add_enabled(!all_inactive, egui::Button::new("Deactivate All")).clicked() {
+                self.set_active_for_selection(state, false);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Static:");
+            if ui.add_enabled(!all_static, egui::Button::new("Set Static")).clicked() {
+                self.set_static_for_selection(state, true);
+            }
+            if ui.add_enabled(!all_dynamic, egui::Button::new("Set Dynamic")).clicked() {
+                self.set_static_for_selection(state, false);
+            }
+        });
+
+        ui.separator();
+
+        let header = egui::CollapsingHeader::new("Transform (All)")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Position");
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.position[0]).speed(0.1).prefix("X: "));
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.position[1]).speed(0.1).prefix("Y: "));
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.position[2]).speed(0.1).prefix("Z: "));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Rotation");
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.rotation[0]).speed(1.0).prefix("X: ").suffix(" deg"));
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.rotation[1]).speed(1.0).prefix("Y: ").suffix(" deg"));
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.rotation[2]).speed(1.0).prefix("Z: ").suffix(" deg"));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Scale   ");
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.scale[0]).speed(0.01).prefix("X: "));
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.scale[1]).speed(0.01).prefix("Y: "));
+                    ui.add(egui::DragValue::new(&mut self.multi_transform.scale[2]).speed(0.01).prefix("Z: "));
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Apply Transform").clicked() {
+                        self.apply_transform_to_selection(state);
+                    }
+                    if ui.button("Reset Transform").clicked() {
+                        self.multi_transform = Transform::default();
+                        self.apply_transform_to_selection(state);
+                    }
+                });
+            });
+
+        if header.header_response.clicked() {
+            if self.expanded_sections.contains("Transform (All)") {
+                self.expanded_sections.remove("Transform (All)");
+            } else {
+                self.expanded_sections.insert("Transform (All)".to_string());
+            }
+        }
+    }
+
+    fn sync_multi_transform(&mut self, state: &EditorState) {
+        if self.multi_selection == state.selection.entities {
+            return;
+        }
+
+        self.multi_selection = state.selection.entities.clone();
+        if self.multi_selection.is_empty() {
+            self.multi_transform = Transform::default();
+            return;
+        }
+
+        let mut sum_position = [0.0_f32; 3];
+        let mut sum_rotation = [0.0_f32; 3];
+        let mut sum_scale = [0.0_f32; 3];
+        let mut count = 0.0_f32;
+
+        for id in &self.multi_selection {
+            if let Some(entity) = state.scene.get(id) {
+                for i in 0..3 {
+                    sum_position[i] += entity.transform.position[i];
+                    sum_rotation[i] += entity.transform.rotation[i];
+                    sum_scale[i] += entity.transform.scale[i];
+                }
+                count += 1.0;
+            }
+        }
+
+        if count > 0.0 {
+            for i in 0..3 {
+                sum_position[i] /= count;
+                sum_rotation[i] /= count;
+                sum_scale[i] /= count;
+            }
+            self.multi_transform = Transform {
+                position: sum_position,
+                rotation: sum_rotation,
+                scale: sum_scale,
+            };
+        }
+    }
+
+    fn apply_transform_to_selection(&self, state: &mut EditorState) {
+        let ids: Vec<_> = state.selection.entities.iter().copied().collect();
+        let transforms = vec![self.multi_transform.clone(); ids.len()];
+        state.set_transforms_bulk(&ids, &transforms, "Batch Transform");
+    }
+
+    fn set_active_for_selection(&self, state: &mut EditorState, active: bool) {
+        for id in state.selection.entities.iter() {
+            if let Some(entity) = state.scene.get_mut(id) {
+                entity.active = active;
+            }
+        }
+        state.dirty = true;
+    }
+
+    fn set_static_for_selection(&self, state: &mut EditorState, is_static: bool) {
+        for id in state.selection.entities.iter() {
+            if let Some(entity) = state.scene.get_mut(id) {
+                entity.is_static = is_static;
+            }
+        }
+        state.dirty = true;
     }
 }
 

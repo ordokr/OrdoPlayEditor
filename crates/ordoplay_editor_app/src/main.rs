@@ -20,9 +20,11 @@ mod app;
 mod commands;
 mod history;
 mod menus;
+mod panel_types;
 mod panels;
 mod state;
 mod theme;
+mod thumbnail;
 mod tools;
 mod viewport_renderer;
 

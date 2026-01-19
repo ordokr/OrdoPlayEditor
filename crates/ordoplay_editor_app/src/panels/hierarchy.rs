@@ -261,46 +261,16 @@ impl HierarchyPanel {
     }
 
     fn delete_entity(&mut self, state: &mut EditorState, entity_id: EntityId) {
-        // Get parent to update its children list
-        if let Some(entity) = state.scene.get(&entity_id) {
-            if let Some(parent_id) = entity.parent {
-                if let Some(parent) = state.scene.get_mut(&parent_id) {
-                    parent.children.retain(|id| *id != entity_id);
-                }
-            }
-        }
-
-        // Remove from selection
-        state.selection.remove(&entity_id);
-
-        // Remove entity (and ideally children, but for simplicity we'll leave orphans for now)
-        state.scene.remove(&entity_id);
-
-        state.dirty = true;
-        tracing::info!("Deleted entity {:?}", entity_id);
+        state.delete_entities(&[entity_id]);
     }
 
     fn duplicate_entity(&mut self, state: &mut EditorState, entity_id: EntityId) {
-        if let Some(original) = state.scene.get(&entity_id).cloned() {
-            let mut new_entity = original.clone();
-            new_entity.name = format!("{} (Copy)", original.name);
-            new_entity.children = Vec::new(); // Don't copy children for now
-
-            let new_id = state.scene.add_entity(new_entity);
-
-            // If original has a parent, add new entity as sibling
-            if let Some(parent_id) = original.parent {
-                if let Some(parent) = state.scene.get_mut(&parent_id) {
-                    parent.children.push(new_id);
-                }
+        let new_ids = state.duplicate_entities(&[entity_id]);
+        if let Some(new_id) = new_ids.first().copied() {
+            self.renaming = Some(new_id);
+            if let Some(entity) = state.scene.get(&new_id) {
+                self.rename_buffer = entity.name.clone();
             }
-
-            // Select the new entity
-            state.selection.clear();
-            state.selection.add(new_id);
-
-            state.dirty = true;
-            tracing::info!("Duplicated entity {:?} to {:?}", entity_id, new_id);
         }
     }
 

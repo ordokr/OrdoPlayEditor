@@ -44,5 +44,8 @@ indexmap.workspace = true
 # Async
 tokio.workspace = true
 
+# Image processing
+image.workspace = true
+
 [lints]
 workspace = true

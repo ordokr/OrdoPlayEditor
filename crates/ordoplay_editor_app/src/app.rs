@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Main editor application setup and event loop.
 
+use crate::panel_types::PanelType;
 use crate::panels::{
     AssetBrowserPanel, ConsolePanel, HierarchyPanel, InspectorPanel, ProfilerPanel, ViewportPanel,
 };
@@ -8,6 +9,11 @@ use crate::state::EditorState;
 use crate::viewport_renderer::ViewportRenderer;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use egui_wgpu::wgpu;
+use ordoplay_editor_graph::graph::Graph;
+use ordoplay_editor_graph::graphs::{gameplay::create_gameplay_registry, material::create_material_registry};
+use ordoplay_editor_graph::node::NodeRegistry;
+use ordoplay_editor_graph::ui::GraphEditorState;
+use ordoplay_editor_sequencer::SequencerPanel;
 use std::sync::Arc;
 use thiserror::Error;
 use winit::application::ApplicationHandler;
@@ -38,61 +44,6 @@ pub enum EditorError {
 /// Result type for editor operations
 pub type Result<T> = std::result::Result<T, EditorError>;
 
-/// Panel types that can be docked in the editor
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PanelType {
-    /// 3D viewport with scene rendering
-    Viewport,
-    /// Entity hierarchy tree
-    Hierarchy,
-    /// Component/property inspector
-    Inspector,
-    /// Asset browser
-    AssetBrowser,
-    /// Console/log output
-    Console,
-    /// Performance profiler
-    Profiler,
-    /// Material graph editor
-    MaterialGraph,
-    /// Gameplay graph (visual scripting)
-    GameplayGraph,
-    /// Animation sequencer
-    Sequencer,
-}
-
-impl PanelType {
-    /// Get the display name for this panel type
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Viewport => "Viewport",
-            Self::Hierarchy => "Hierarchy",
-            Self::Inspector => "Inspector",
-            Self::AssetBrowser => "Asset Browser",
-            Self::Console => "Console",
-            Self::Profiler => "Profiler",
-            Self::MaterialGraph => "Material Graph",
-            Self::GameplayGraph => "Gameplay Graph",
-            Self::Sequencer => "Sequencer",
-        }
-    }
-
-    /// Get the icon for this panel type
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Self::Viewport => "\u{1f3a5}",      // camera
-            Self::Hierarchy => "\u{1f4c2}",     // folder
-            Self::Inspector => "\u{2699}",      // cog
-            Self::AssetBrowser => "\u{1f4c1}",  // folder
-            Self::Console => "\u{1f4bb}",       // terminal
-            Self::Profiler => "\u{1f4ca}",      // chart
-            Self::MaterialGraph => "\u{1f3a8}", // palette
-            Self::GameplayGraph => "\u{1f500}", // branch
-            Self::Sequencer => "\u{1f3ac}",     // film
-        }
-    }
-}
-
 /// Tab viewer implementation for egui_dock
 pub struct EditorTabViewer<'a> {
     state: &'a mut EditorState,
@@ -102,6 +53,13 @@ pub struct EditorTabViewer<'a> {
     asset_browser: &'a mut AssetBrowserPanel,
     console: &'a mut ConsolePanel,
     profiler: &'a mut ProfilerPanel,
+    material_graph: &'a mut Graph,
+    material_graph_state: &'a mut GraphEditorState,
+    material_registry: &'a NodeRegistry,
+    gameplay_graph: &'a mut Graph,
+    gameplay_graph_state: &'a mut GraphEditorState,
+    gameplay_registry: &'a NodeRegistry,
+    sequencer_panel: &'a mut SequencerPanel,
     /// Viewport renderer (optional, for 3D rendering)
     viewport_renderer: Option<&'a mut ViewportRenderer>,
     /// Graphics device (for renderer operations)
@@ -148,23 +106,27 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
             }
             PanelType::Hierarchy => self.hierarchy.ui(ui, self.state),
             PanelType::Inspector => self.inspector.ui(ui, self.state),
-            PanelType::AssetBrowser => self.asset_browser.ui(ui, self.state),
+            PanelType::AssetBrowser => {
+                // Update thumbnail manager with graphics context if available
+                if let (Some(device), Some(queue), Some(egui_renderer)) =
+                    (self.device, self.queue, self.egui_renderer.as_mut())
+                {
+                    self.asset_browser.update_thumbnails(device, queue, egui_renderer);
+                }
+                self.asset_browser.ui(ui, self.state);
+            }
             PanelType::Console => self.console.ui(ui, self.state),
             PanelType::Profiler => self.profiler.ui(ui, self.state),
             PanelType::MaterialGraph => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Material Graph Editor - Coming Soon");
-                });
+                self.material_graph_state
+                    .ui_with_registry(ui, self.material_graph, Some(self.material_registry));
             }
             PanelType::GameplayGraph => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Gameplay Graph Editor - Coming Soon");
-                });
+                self.gameplay_graph_state
+                    .ui_with_registry(ui, self.gameplay_graph, Some(self.gameplay_registry));
             }
             PanelType::Sequencer => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Sequencer - Coming Soon");
-                });
+                self.sequencer_panel.ui(ui);
             }
         }
     }
@@ -375,6 +337,13 @@ struct EditorInner {
     asset_browser: AssetBrowserPanel,
     console: ConsolePanel,
     profiler: ProfilerPanel,
+    material_graph: Graph,
+    material_graph_state: GraphEditorState,
+    material_registry: NodeRegistry,
+    gameplay_graph: Graph,
+    gameplay_graph_state: GraphEditorState,
+    gameplay_registry: NodeRegistry,
+    sequencer_panel: SequencerPanel,
     /// Command palette
     command_palette: crate::menus::CommandPalette,
     /// Keyboard shortcut registry
@@ -395,6 +364,9 @@ struct EditorInner {
 
 impl EditorInner {
     fn new() -> Self {
+        let material_registry = create_material_registry();
+        let gameplay_registry = create_gameplay_registry();
+
         Self {
             state: EditorState::new(),
             dock_state: Self::create_default_layout(),
@@ -404,6 +376,13 @@ impl EditorInner {
             asset_browser: AssetBrowserPanel::new(),
             console: ConsolePanel::new(),
             profiler: ProfilerPanel::new(),
+            material_graph: Self::create_material_graph(&material_registry),
+            material_graph_state: GraphEditorState::new(),
+            material_registry,
+            gameplay_graph: Self::create_gameplay_graph(&gameplay_registry),
+            gameplay_graph_state: GraphEditorState::new(),
+            gameplay_registry,
+            sequencer_panel: SequencerPanel::new("Main Sequencer"),
             command_palette: crate::menus::CommandPalette::new(),
             shortcuts: crate::menus::ShortcutRegistry::new(),
             theme: crate::theme::EditorTheme::default(),
@@ -413,6 +392,25 @@ impl EditorInner {
             show_unsaved_warning: false,
             pending_action: None,
         }
+    }
+
+    fn create_material_graph(registry: &NodeRegistry) -> Graph {
+        let mut graph = Graph::new("Material Graph");
+        if let Some(node) = registry.create_node("material_output") {
+            graph.add_node(node.with_position(300.0, 0.0));
+        }
+        graph
+    }
+
+    fn create_gameplay_graph(registry: &NodeRegistry) -> Graph {
+        let mut graph = Graph::new("Gameplay Graph");
+        if let Some(node) = registry.create_node("event_begin_play") {
+            graph.add_node(node.with_position(0.0, 0.0));
+        }
+        if let Some(node) = registry.create_node("print_string") {
+            graph.add_node(node.with_position(240.0, 0.0));
+        }
+        graph
     }
 
     fn create_default_layout() -> DockState<PanelType> {
@@ -454,6 +452,9 @@ impl EditorInner {
         queue: &wgpu::Queue,
         egui_renderer: &mut egui_wgpu::Renderer,
     ) {
+        let delta_time = ctx.input(|i| i.stable_dt) as f32;
+        self.sequencer_panel.update(delta_time);
+
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -474,6 +475,13 @@ impl EditorInner {
             asset_browser: &mut self.asset_browser,
             console: &mut self.console,
             profiler: &mut self.profiler,
+            material_graph: &mut self.material_graph,
+            material_graph_state: &mut self.material_graph_state,
+            material_registry: &self.material_registry,
+            gameplay_graph: &mut self.gameplay_graph,
+            gameplay_graph_state: &mut self.gameplay_graph_state,
+            gameplay_registry: &self.gameplay_registry,
+            sequencer_panel: &mut self.sequencer_panel,
             viewport_renderer: Some(viewport_renderer),
             device: Some(device),
             queue: Some(queue),
@@ -499,6 +507,11 @@ impl EditorInner {
 
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
+
+        // Open any pending panels requested by other systems
+        for panel in self.state.take_pending_panels() {
+            self.open_panel(panel);
+        }
     }
 
     fn show_theme_settings(&mut self, ctx: &egui::Context) {
@@ -738,7 +751,9 @@ impl EditorInner {
                 "Undo (Ctrl+Z)".to_string()
             };
             if ui.add_enabled(can_undo, egui::Button::new(undo_text)).clicked() {
-                let _ = self.state.history.undo();
+                if let Err(err) = self.state.undo() {
+                    tracing::warn!("Undo failed: {err}");
+                }
                 ui.close_menu();
             }
 
@@ -749,7 +764,9 @@ impl EditorInner {
                 "Redo (Ctrl+Y)".to_string()
             };
             if ui.add_enabled(can_redo, egui::Button::new(redo_text)).clicked() {
-                let _ = self.state.history.redo();
+                if let Err(err) = self.state.redo() {
+                    tracing::warn!("Redo failed: {err}");
+                }
                 ui.close_menu();
             }
 
@@ -790,7 +807,7 @@ impl EditorInner {
                     PanelType::Sequencer,
                 ] {
                     if ui.button(panel.name()).clicked() {
-                        // TODO: Open/focus panel
+                        self.open_panel(panel);
                         ui.close_menu();
                     }
                 }
@@ -909,10 +926,14 @@ impl EditorInner {
 
             // Edit commands
             "edit.undo" => {
-                let _ = self.state.history.undo();
+                if let Err(err) = self.state.undo() {
+                    tracing::warn!("Undo failed: {err}");
+                }
             }
             "edit.redo" => {
-                let _ = self.state.history.redo();
+                if let Err(err) = self.state.redo() {
+                    tracing::warn!("Redo failed: {err}");
+                }
             }
             "edit.delete" => {
                 self.state.delete_selected();
@@ -969,12 +990,30 @@ impl EditorInner {
             // Panel commands - these would ideally show/focus the panels
             "panel.viewport" | "panel.hierarchy" | "panel.inspector" |
             "panel.asset_browser" | "panel.console" | "panel.profiler" => {
-                tracing::info!("Show panel: {}", command_id);
+                let panel = match command_id {
+                    "panel.viewport" => PanelType::Viewport,
+                    "panel.hierarchy" => PanelType::Hierarchy,
+                    "panel.inspector" => PanelType::Inspector,
+                    "panel.asset_browser" => PanelType::AssetBrowser,
+                    "panel.console" => PanelType::Console,
+                    "panel.profiler" => PanelType::Profiler,
+                    _ => return,
+                };
+                self.open_panel(panel);
             }
 
             _ => {
                 tracing::warn!("Unknown command: {}", command_id);
             }
+        }
+    }
+
+    fn open_panel(&mut self, panel: PanelType) {
+        if let Some((surface, node, tab)) = self.dock_state.find_tab(&panel) {
+            self.dock_state.set_active_tab((surface, node, tab));
+            self.dock_state.set_focused_node_and_surface((surface, node));
+        } else {
+            self.dock_state.push_to_focused_leaf(panel);
         }
     }
 }

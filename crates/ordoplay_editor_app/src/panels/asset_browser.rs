@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Asset browser panel - File/asset navigation.
 
+use crate::panel_types::PanelType;
 use crate::state::EditorState;
+use crate::thumbnail::{ThumbnailManager, ThumbnailState};
+use egui_wgpu::wgpu;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -162,6 +165,10 @@ pub struct AssetBrowserPanel {
     history_index: usize,
     /// Pending asset to drag (for drag-drop)
     pub dragging_asset: Option<PathBuf>,
+    /// Thumbnail manager for image previews
+    pub thumbnail_manager: ThumbnailManager,
+    /// Whether to show thumbnails (vs icons)
+    pub show_thumbnails: bool,
 }
 
 impl AssetBrowserPanel {
@@ -184,12 +191,25 @@ impl AssetBrowserPanel {
             history: vec![root.clone()],
             history_index: 0,
             dragging_asset: None,
+            thumbnail_manager: ThumbnailManager::new(),
+            show_thumbnails: true,
         };
 
         panel.expanded_dirs.insert(root);
         panel.build_mock_tree();
         panel.add_mock_assets();
         panel
+    }
+
+    /// Update thumbnail manager with graphics context
+    /// Call this each frame before rendering
+    pub fn update_thumbnails(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        egui_renderer: &mut egui_wgpu::Renderer,
+    ) {
+        self.thumbnail_manager.update(device, queue, egui_renderer);
     }
 
     fn build_mock_tree(&mut self) {
@@ -381,7 +401,7 @@ impl AssetBrowserPanel {
     }
 
     /// Render the asset browser panel
-    pub fn ui(&mut self, ui: &mut egui::Ui, _state: &mut EditorState) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, state: &mut EditorState) {
         // Toolbar
         ui.horizontal(|ui| {
             // Navigation buttons
@@ -481,8 +501,8 @@ impl AssetBrowserPanel {
         // Content area
         egui::ScrollArea::vertical().show(ui, |ui| {
             match self.view_mode {
-                AssetViewMode::Grid => self.grid_view(ui),
-                AssetViewMode::List => self.list_view(ui),
+                AssetViewMode::Grid => self.grid_view(ui, state),
+                AssetViewMode::List => self.list_view(ui, state),
             }
         });
     }
@@ -585,7 +605,7 @@ impl AssetBrowserPanel {
         }
     }
 
-    fn grid_view(&mut self, ui: &mut egui::Ui) {
+    fn grid_view(&mut self, ui: &mut egui::Ui, state: &mut EditorState) {
         let available_width = ui.available_width();
         let item_width = self.icon_size + 16.0;
         let columns = ((available_width / item_width) as usize).max(1);
@@ -598,6 +618,16 @@ impl AssetBrowserPanel {
 
         let mut new_path: Option<PathBuf> = None;
         let mut new_selection: Option<PathBuf> = None;
+        let mut open_path: Option<PathBuf> = None;
+
+        // Request thumbnails for visible texture assets
+        if self.show_thumbnails {
+            for (path, _, asset_type, is_folder, _) in &filtered_data {
+                if !*is_folder && *asset_type == AssetType::Texture {
+                    self.thumbnail_manager.request_thumbnail(path);
+                }
+            }
+        }
 
         egui::Grid::new("asset_grid")
             .num_columns(columns)
@@ -622,20 +652,30 @@ impl AssetBrowserPanel {
                                 );
                             }
 
-                            let icon = if *is_folder { "\u{f07b}" } else { asset_type.icon() };
-                            let icon_color = if *is_folder {
-                                egui::Color32::from_rgb(255, 200, 80)
+                            // Try to render thumbnail for texture assets
+                            let rendered_thumbnail = if self.show_thumbnails && !*is_folder && *asset_type == AssetType::Texture {
+                                self.render_thumbnail(ui, path, icon_rect)
                             } else {
-                                egui::Color32::from_rgb(180, 180, 180)
+                                false
                             };
 
-                            ui.painter().text(
-                                icon_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                icon,
-                                egui::FontId::proportional(self.icon_size * 0.5),
-                                icon_color,
-                            );
+                            // Fall back to icon if no thumbnail
+                            if !rendered_thumbnail {
+                                let icon = if *is_folder { "\u{f07b}" } else { asset_type.icon() };
+                                let icon_color = if *is_folder {
+                                    egui::Color32::from_rgb(255, 200, 80)
+                                } else {
+                                    egui::Color32::from_rgb(180, 180, 180)
+                                };
+
+                                ui.painter().text(
+                                    icon_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    icon,
+                                    egui::FontId::proportional(self.icon_size * 0.5),
+                                    icon_color,
+                                );
+                            }
 
                             let max_chars = (self.icon_size / 8.0) as usize;
                             let display_name = if name.len() > max_chars {
@@ -655,8 +695,12 @@ impl AssetBrowserPanel {
                             }
                         }
 
-                        if response.response.double_clicked() && *is_folder {
-                            new_path = Some(path.clone());
+                        if response.response.double_clicked() {
+                            if *is_folder {
+                                new_path = Some(path.clone());
+                            } else {
+                                open_path = Some(path.clone());
+                            }
                         }
                     });
                 }
@@ -669,9 +713,12 @@ impl AssetBrowserPanel {
         if let Some(path) = new_selection {
             self.selected = vec![path];
         }
+        if let Some(path) = open_path {
+            self.open_asset(state, &path);
+        }
     }
 
-    fn list_view(&mut self, ui: &mut egui::Ui) {
+    fn list_view(&mut self, ui: &mut egui::Ui, state: &mut EditorState) {
         // Collect filtered assets
         let filtered: Vec<_> = self.assets.iter()
             .filter(|a| self.matches_filter(a))
@@ -732,7 +779,7 @@ impl AssetBrowserPanel {
             }
 
             if response.inner.double_clicked() && !asset.is_folder {
-                // TODO: Open asset
+                self.open_asset(state, &asset.path);
             }
 
             // Context menu
@@ -740,6 +787,8 @@ impl AssetBrowserPanel {
                 if ui.button("Open").clicked() {
                     if asset.is_folder {
                         self.navigate_to(asset.path.clone());
+                    } else {
+                        self.open_asset(state, &asset.path);
                     }
                     ui.close_menu();
                 }
@@ -762,7 +811,7 @@ impl AssetBrowserPanel {
         }
     }
 
-    fn render_grid_item(&mut self, ui: &mut egui::Ui, asset: &AssetEntry, is_selected: bool) {
+    fn render_grid_item(&mut self, ui: &mut egui::Ui, asset: &AssetEntry, is_selected: bool, state: &mut EditorState) {
         let size = egui::vec2(self.icon_size + 8.0, self.icon_size + 24.0);
 
         ui.allocate_ui(size, |ui| {
@@ -819,8 +868,7 @@ impl AssetBrowserPanel {
                 if asset.is_folder {
                     self.current_path = asset.path.clone();
                 } else {
-                    // TODO: Open asset in appropriate editor
-                    tracing::info!("Opening asset: {:?}", asset.path);
+                    self.open_asset(state, &asset.path);
                 }
             }
 
@@ -843,6 +891,72 @@ impl AssetBrowserPanel {
         });
     }
 
+    /// Render a thumbnail for the given path in the given rect
+    /// Returns true if a thumbnail was rendered, false if fallback to icon is needed
+    fn render_thumbnail(&self, ui: &mut egui::Ui, path: &PathBuf, rect: egui::Rect) -> bool {
+        match self.thumbnail_manager.get_state(path) {
+            ThumbnailState::Ready(texture_id) => {
+                // Draw the thumbnail image
+                ui.painter().image(
+                    texture_id,
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+
+                // Draw subtle border
+                ui.painter().rect_stroke(
+                    rect,
+                    4.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
+                );
+
+                true
+            }
+            ThumbnailState::Loading => {
+                // Draw loading indicator
+                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(45));
+
+                let center = rect.center();
+                let time = ui.input(|i| i.time);
+                let angle = time as f32 * 3.0;
+                let radius = rect.width().min(rect.height()) * 0.25;
+
+                // Background circle
+                ui.painter().circle_stroke(
+                    center,
+                    radius,
+                    egui::Stroke::new(2.0, egui::Color32::from_gray(60)),
+                );
+
+                // Spinning arc
+                let start_angle = angle;
+                let end_angle = angle + std::f32::consts::PI * 0.75;
+                let points: Vec<egui::Pos2> = (0..20)
+                    .map(|i| {
+                        let t = i as f32 / 19.0;
+                        let a = start_angle + (end_angle - start_angle) * t;
+                        egui::pos2(center.x + radius * a.cos(), center.y + radius * a.sin())
+                    })
+                    .collect();
+
+                ui.painter().add(egui::Shape::line(
+                    points,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255)),
+                ));
+
+                // Request repaint for animation
+                ui.ctx().request_repaint();
+
+                true
+            }
+            ThumbnailState::Failed(_) | ThumbnailState::UseDefault | ThumbnailState::NotLoaded => {
+                // Use fallback icon
+                false
+            }
+        }
+    }
+
     fn matches_filter(&self, asset: &AssetEntry) -> bool {
         // Search filter
         if !self.search.is_empty() {
@@ -859,6 +973,34 @@ impl AssetBrowserPanel {
         }
 
         true
+    }
+
+    fn open_asset(&mut self, state: &mut EditorState, path: &PathBuf) {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let asset_type = AssetType::from_extension(ext);
+
+        match asset_type {
+            AssetType::Scene => {
+                if state.has_unsaved_changes() {
+                    tracing::warn!("Unsaved changes - save before opening {}", path.display());
+                    return;
+                }
+                if let Err(err) = state.load_scene(path) {
+                    tracing::error!("Failed to load scene {}: {}", path.display(), err);
+                }
+            }
+            AssetType::Material | AssetType::Shader => {
+                state.request_panel_open(PanelType::MaterialGraph);
+                tracing::info!("Opening material editor for {}", path.display());
+            }
+            AssetType::Animation => {
+                state.request_panel_open(PanelType::Sequencer);
+                tracing::info!("Opening sequencer for {}", path.display());
+            }
+            _ => {
+                tracing::info!("Open asset not implemented: {}", path.display());
+            }
+        }
     }
 }
 
