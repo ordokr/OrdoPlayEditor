@@ -2,7 +2,7 @@
 //! Material/shader graph for visual material authoring.
 //!
 //! Provides a comprehensive set of nodes for creating PBR materials
-//! compatible with ordoplay_materialx for runtime compilation to WGSL.
+//! compatible with `ordoplay_materialx` for runtime compilation to WGSL.
 
 use crate::node::{NodeCategory, NodeRegistry, NodeType};
 use crate::port::{Port, PortType, PortValue};

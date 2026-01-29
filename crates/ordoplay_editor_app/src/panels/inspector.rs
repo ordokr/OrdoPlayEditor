@@ -164,11 +164,10 @@ impl InspectorPanel {
                 if ui.small_button("Revert All").on_hover_text("Revert all property changes to prefab values").clicked() {
                     state.revert_all_overrides(entity_id);
                 }
-                if is_prefab_root {
-                    if ui.small_button("Unpack").on_hover_text("Remove prefab link").clicked() {
+                if is_prefab_root
+                    && ui.small_button("Unpack").on_hover_text("Remove prefab link").clicked() {
                         state.unpack_prefab(entity_id);
                     }
-                }
             });
             ui.add_space(4.0);
         }
@@ -838,8 +837,8 @@ impl InspectorPanel {
         // Mode toggle for relative vs absolute editing
         ui.horizontal(|ui| {
             ui.label("Edit Mode:");
-            if ui.selectable_label(self.multi_edit_relative, "Relative").clicked() {
-                if !self.multi_edit_relative {
+            if ui.selectable_label(self.multi_edit_relative, "Relative").clicked()
+                && !self.multi_edit_relative {
                     self.multi_edit_relative = true;
                     // Reset offset values when switching to relative mode
                     self.multi_transform = Transform {
@@ -848,14 +847,12 @@ impl InspectorPanel {
                         scale: [1.0, 1.0, 1.0],
                     };
                 }
-            }
-            if ui.selectable_label(!self.multi_edit_relative, "Absolute").clicked() {
-                if self.multi_edit_relative {
+            if ui.selectable_label(!self.multi_edit_relative, "Absolute").clicked()
+                && self.multi_edit_relative {
                     self.multi_edit_relative = false;
                     // Sync to average values when switching to absolute mode
                     self.force_sync_multi_transform(state);
                 }
-            }
             ui.add_space(10.0);
             ui.label(if self.multi_edit_relative {
                 "(+/- offset)"
@@ -1114,18 +1111,18 @@ impl InspectorPanel {
     }
 
     fn apply_transform_to_selection(&self, state: &mut EditorState) {
-        let ids: Vec<_> = state.selection.entities.iter().copied().collect();
+        let ids: Vec<_> = state.selection.entities.to_vec();
         let transforms = vec![self.multi_transform.clone(); ids.len()];
         state.set_transforms_bulk(&ids, &transforms, "Batch Transform");
     }
 
     fn set_active_for_selection(&self, state: &mut EditorState, active: bool) {
-        let ids: Vec<_> = state.selection.entities.iter().copied().collect();
+        let ids: Vec<_> = state.selection.entities.to_vec();
         state.set_entities_active_bulk(&ids, active);
     }
 
     fn set_static_for_selection(&self, state: &mut EditorState, is_static: bool) {
-        let ids: Vec<_> = state.selection.entities.iter().copied().collect();
+        let ids: Vec<_> = state.selection.entities.to_vec();
         state.set_entities_static_bulk(&ids, is_static);
     }
 }

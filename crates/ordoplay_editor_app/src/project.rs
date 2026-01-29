@@ -126,7 +126,7 @@ pub enum TextureCompression {
     None,
     #[default]
     BC,      // Desktop (DXT/BC)
-    ASTC,    // Mobile
+    Astc,    // Mobile
     ETC2,    // Android/WebGL
 }
 
@@ -215,7 +215,7 @@ pub struct SceneSettings {
 pub struct CollisionLayerSettings {
     /// Names for each layer
     pub layer_names: Vec<String>,
-    /// Collision matrix - layer_matrix[i][j] indicates if layer i collides with layer j
+    /// Collision matrix - `layer_matrix`[i][j] indicates if layer i collides with layer j
     pub layer_matrix: Vec<Vec<bool>>,
 }
 
@@ -337,7 +337,7 @@ impl Default for AudioSettings {
 pub struct GraphicsSettings {
     /// Default quality level
     pub default_quality: QualityLevel,
-    /// VSync enabled by default
+    /// `VSync` enabled by default
     pub vsync: bool,
     /// Target frame rate (0 = unlimited)
     pub target_frame_rate: u32,
@@ -607,17 +607,19 @@ impl ProjectSettings {
 
     /// Get platform-specific build settings
     pub fn get_platform_settings(&self, platform: TargetPlatform) -> &PlatformBuildSettings {
+        static DEFAULT: std::sync::LazyLock<PlatformBuildSettings> = std::sync::LazyLock::new(|| {
+            PlatformBuildSettings {
+                enabled: true,
+                output_dir: PathBuf::new(),
+                texture_compression: TextureCompression::BC,
+                compress_assets: true,
+                include_debug_symbols: false,
+                defines: Vec::new(),
+            }
+        });
         self.platform_settings
             .get(&platform)
             .unwrap_or_else(|| {
-                static DEFAULT: PlatformBuildSettings = PlatformBuildSettings {
-                    enabled: true,
-                    output_dir: PathBuf::new(),
-                    texture_compression: TextureCompression::BC,
-                    compress_assets: true,
-                    include_debug_symbols: false,
-                    defines: Vec::new(),
-                };
                 &DEFAULT
             })
     }
@@ -626,7 +628,7 @@ impl ProjectSettings {
     pub fn get_platform_settings_mut(&mut self, platform: TargetPlatform) -> &mut PlatformBuildSettings {
         self.platform_settings
             .entry(platform)
-            .or_insert_with(PlatformBuildSettings::default)
+            .or_default()
     }
 
     /// Add a scene to the build list

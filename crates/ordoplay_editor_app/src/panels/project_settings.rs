@@ -212,11 +212,11 @@ impl ProjectSettingsPanel {
         let current_tc = ps.texture_compression;
         ui.horizontal(|ui| {
             ui.label("Texture Compression:");
-            for tc in [TextureCompression::None, TextureCompression::BC, TextureCompression::ASTC, TextureCompression::ETC2] {
+            for tc in [TextureCompression::None, TextureCompression::BC, TextureCompression::Astc, TextureCompression::ETC2] {
                 let name = match tc {
                     TextureCompression::None => "None",
                     TextureCompression::BC => "BC",
-                    TextureCompression::ASTC => "ASTC",
+                    TextureCompression::Astc => "ASTC",
                     TextureCompression::ETC2 => "ETC2",
                 };
                 if ui.selectable_label(current_tc == tc, name).clicked() {
@@ -331,11 +331,10 @@ impl ProjectSettingsPanel {
                 if ui.small_button("X").clicked() {
                     action = Some((i, "remove"));
                 }
-                if startup.as_ref() != Some(path) {
-                    if ui.small_button("*").on_hover_text("Set startup").clicked() {
+                if startup.as_ref() != Some(path)
+                    && ui.small_button("*").on_hover_text("Set startup").clicked() {
                         action = Some((i, "startup"));
                     }
-                }
             });
         }
 

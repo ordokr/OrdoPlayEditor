@@ -123,17 +123,14 @@ impl Default for MeshRendererComponent {
 /// Light types
 #[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub enum LightType {
     Directional,
+    #[default]
     Point,
     Spot,
 }
 
-impl Default for LightType {
-    fn default() -> Self {
-        Self::Point
-    }
-}
 
 /// Light component for illumination
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -387,7 +384,7 @@ impl Default for CapsuleColliderComponent {
 /// Mesh collider component
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MeshColliderComponent {
-    /// Path to the mesh asset (uses same mesh as MeshRenderer if empty)
+    /// Path to the mesh asset (uses same mesh as `MeshRenderer` if empty)
     pub mesh: String,
     /// Whether the mesh is convex (faster, but must be convex hull)
     pub convex: bool,

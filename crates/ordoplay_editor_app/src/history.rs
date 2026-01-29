@@ -2,7 +2,7 @@
 //! Undo/redo history system using Copy-on-Write patterns.
 //!
 //! This is a standalone implementation of the undo/redo system
-//! based on the patterns from ordoplay_editor.
+//! based on the patterns from `ordoplay_editor`.
 
 
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,7 @@ impl OperationID {
     }
 }
 
-/// Component state snapshot (CoW data)
+/// Component state snapshot (`CoW` data)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSnapshot {
     /// Serialized component state
@@ -161,7 +161,7 @@ impl OperationGroup {
 
     /// Get total memory size of this group
     pub fn memory_size(&self) -> usize {
-        self.operations.iter().map(|op| op.memory_size()).sum()
+        self.operations.iter().map(Operation::memory_size).sum()
     }
 
     /// Get operation count

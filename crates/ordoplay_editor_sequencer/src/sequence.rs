@@ -102,7 +102,7 @@ impl Sequence {
     /// Get the duration based on track content
     pub fn content_duration(&self) -> f32 {
         self.tracks.values()
-            .map(|t| t.duration())
+            .map(Track::duration)
             .fold(0.0, f32::max)
     }
 

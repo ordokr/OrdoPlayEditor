@@ -213,7 +213,7 @@ impl DiskCache {
 
         // Write metadata
         let meta_json = serde_json::to_vec(&metadata)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         fs::write(&meta_path, &meta_json)?;
 
         // Write pixel data
@@ -328,7 +328,7 @@ impl ThumbnailManager {
     /// Get disk cache statistics
     #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn disk_cache_stats(&self) -> Option<(usize, u64)> {
-        self.disk_cache.as_ref().map(|dc| dc.stats())
+        self.disk_cache.as_ref().map(DiskCache::stats)
     }
 
     /// Clear disk cache
@@ -345,13 +345,8 @@ impl ThumbnailManager {
         let mut states = self.states.write();
 
         // Skip if already loaded or loading
-        if let Some(state) = states.get(path) {
-            match state {
-                ThumbnailState::Ready(_) | ThumbnailState::Loading | ThumbnailState::UseDefault => {
-                    return;
-                }
-                _ => {}
-            }
+        if let Some(ThumbnailState::Ready(_) | ThumbnailState::Loading | ThumbnailState::UseDefault) = states.get(path) {
+            return;
         }
 
         // Check if we can generate a thumbnail for this file type
@@ -375,7 +370,7 @@ impl ThumbnailManager {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase());
+            .map(str::to_lowercase);
 
         matches!(
             ext.as_deref(),
@@ -636,7 +631,7 @@ async fn generate_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
+        .map(str::to_lowercase)
         .ok_or_else(|| ThumbnailError::UnsupportedFormat("No extension".to_string()))?;
 
     // Load and process based on type
@@ -741,7 +736,7 @@ fn extract_path_from_error(_error: &ThumbnailError) -> Option<PathBuf> {
     None
 }
 
-/// Create a wgpu texture from egui ColorImage
+/// Create a wgpu texture from egui `ColorImage`
 fn create_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -768,7 +763,7 @@ fn create_texture(
     let pixels: Vec<u8> = image
         .pixels
         .iter()
-        .flat_map(|c| c.to_array())
+        .flat_map(egui::Color32::to_array)
         .collect();
 
     queue.write_texture(
@@ -893,7 +888,7 @@ fn get_file_icon(path: &Path) -> &'static str {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase());
+        .map(str::to_lowercase);
 
     match ext.as_deref() {
         // Images

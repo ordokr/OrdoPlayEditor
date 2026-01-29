@@ -2,7 +2,7 @@
 //! Editor commands for undo/redo support.
 //!
 //! Commands encapsulate editor operations and integrate with
-//! the ordoplay_editor::History system.
+//! the `ordoplay_editor::History` system.
 
 
 use crate::history::{HistoryError, Operation, OperationID, StateSnapshot};
@@ -406,8 +406,8 @@ impl DuplicateCommand {
         }
     }
 
-    /// Recursively duplicate an entity and all its children, returning all (new_id, entity_data) pairs.
-    /// `id_map` accumulates old_id -> new_id mappings.
+    /// Recursively duplicate an entity and all its children, returning all (`new_id`, `entity_data`) pairs.
+    /// `id_map` accumulates `old_id` -> `new_id` mappings.
     fn duplicate_recursive(
         source_id: EntityId,
         new_id: EntityId,
@@ -937,7 +937,7 @@ impl SpawnCommand {
                     .as_ref()
                     .and_then(|path| std::path::Path::new(path).file_stem())
                     .and_then(|name| name.to_str())
-                    .map(|name| name.to_string())
+                    .map(ToString::to_string)
             })
             .unwrap_or_else(|| "New Entity".to_string());
 

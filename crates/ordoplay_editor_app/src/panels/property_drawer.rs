@@ -83,13 +83,13 @@ impl PropertyMeta {
         self
     }
 
-    pub fn as_angle(mut self) -> Self {
+    pub fn into_angle(mut self) -> Self {
         self.is_angle = true;
         self.suffix = Some("°".to_string());
         self
     }
 
-    pub fn as_color(mut self) -> Self {
+    pub fn into_color(mut self) -> Self {
         self.is_color = true;
         self
     }
@@ -649,7 +649,7 @@ pub fn draw_vec<T: Default + Clone>(
     egui::CollapsingHeader::new(format!("{} ({})", meta.name, item_count))
         .default_open(false)
         .show(ui, |ui| {
-            for i in 0..item_count {
+            for (i, item) in items.iter_mut().enumerate().take(item_count) {
                 let is_last = i == item_count - 1;
 
                 ui.horizontal(|ui| {
@@ -657,7 +657,7 @@ pub fn draw_vec<T: Default + Clone>(
                     ui.label(format!("[{}]", i));
 
                     // Draw the item
-                    let item_result = draw_item(ui, i, &mut items[i]);
+                    let item_result = draw_item(ui, i, item);
                     if item_result.is_changed() {
                         result = item_result;
                     }
@@ -667,18 +667,16 @@ pub fn draw_vec<T: Default + Clone>(
                         if ui.small_button("X").on_hover_text("Remove").clicked() {
                             remove_index = Some(i);
                         }
-                        if !is_last {
-                            if ui.small_button("v").on_hover_text("Move down").clicked() {
+                        if !is_last
+                            && ui.small_button("v").on_hover_text("Move down").clicked() {
                                 move_from = Some(i);
                                 move_to = Some(i + 1);
                             }
-                        }
-                        if i > 0 {
-                            if ui.small_button("^").on_hover_text("Move up").clicked() {
+                        if i > 0
+                            && ui.small_button("^").on_hover_text("Move up").clicked() {
                                 move_from = Some(i);
                                 move_to = Some(i - 1);
                             }
-                        }
                     });
                 });
             }
@@ -715,7 +713,7 @@ mod tests {
             .with_tooltip("A test property")
             .with_range(0.0, 100.0)
             .with_step(0.5)
-            .as_angle();
+            .into_angle();
 
         assert_eq!(meta.name, "Test");
         assert_eq!(meta.tooltip, Some("A test property".to_string()));

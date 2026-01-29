@@ -163,8 +163,7 @@ impl Track {
 
         match (prev, next) {
             (None, None) => None,
-            (Some(kf), None) => Some(kf.value.clone()),
-            (None, Some(kf)) => Some(kf.value.clone()),
+            (Some(kf), None) | (None, Some(kf)) => Some(kf.value.clone()),
             (Some(a), Some(b)) => {
                 if (b.time - a.time).abs() < 0.0001 {
                     return Some(b.value.clone());
@@ -212,7 +211,7 @@ impl Track {
     }
 
     /// Create a transform keyframe with position, rotation, scale
-    /// Note: For full transform animation, use TransformTrack which has separate channels
+    /// Note: For full transform animation, use `TransformTrack` which has separate channels
     pub fn create_transform_keyframe(
         &mut self,
         time: f32,
@@ -502,8 +501,7 @@ impl CameraTrack {
     /// Get active camera at time
     pub fn active_camera_at(&self, time: f32) -> Option<&CameraCut> {
         self.cuts.iter()
-            .filter(|c| c.time <= time)
-            .last()
+            .rfind(|c| c.time <= time)
     }
 }
 

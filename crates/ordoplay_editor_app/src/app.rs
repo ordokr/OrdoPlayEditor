@@ -45,7 +45,7 @@ pub enum EditorError {
 /// Result type for editor operations
 pub type Result<T> = std::result::Result<T, EditorError>;
 
-/// Tab viewer implementation for egui_dock
+/// Tab viewer implementation for `egui_dock`
 pub struct EditorTabViewer<'a> {
     state: &'a mut EditorState,
     viewport: &'a mut ViewportPanel,
@@ -306,7 +306,7 @@ impl GraphicsState {
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(wgpu::TextureFormat::is_srgb)
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
@@ -578,7 +578,7 @@ impl EditorInner {
         queue: &wgpu::Queue,
         egui_renderer: &mut egui_wgpu::Renderer,
     ) {
-        let delta_time = ctx.input(|i| i.stable_dt) as f32;
+        let delta_time = ctx.input(|i| i.stable_dt);
         self.sequencer_panel.update(delta_time);
 
         // Update physics simulation if in play mode
@@ -1027,12 +1027,9 @@ impl EditorInner {
             });
 
             ui.menu_button("Physics Debug", |ui| {
-                if ui.checkbox(&mut self.state.physics_debug.show_colliders, "Show Colliders").changed() {
-                }
-                if ui.checkbox(&mut self.state.physics_debug.show_velocities, "Show Velocities").changed() {
-                }
-                if ui.checkbox(&mut self.state.physics_debug.show_contacts, "Show Contacts").changed() {
-                }
+                ui.checkbox(&mut self.state.physics_debug.show_colliders, "Show Colliders").changed();
+                ui.checkbox(&mut self.state.physics_debug.show_velocities, "Show Velocities").changed();
+                ui.checkbox(&mut self.state.physics_debug.show_contacts, "Show Contacts").changed();
                 if ui.checkbox(&mut self.state.physics_debug.show_layers, "Show Layers").changed() {
                 }
             });
@@ -1108,15 +1105,14 @@ impl EditorInner {
         }
 
         // Step frame button (only when paused)
-        if is_paused {
-            if ui.small_button("\u{23ED}")  // Next frame symbol
+        if is_paused
+            && ui.small_button("\u{23ED}")  // Next frame symbol
                 .on_hover_text("Step Frame")
                 .clicked()
             {
                 let timestep = self.state.project_manager.settings.physics.fixed_timestep as f64;
                 self.state.play_mode.step_frame(timestep);
             }
-        }
 
         // Stop button
         if ui.add_enabled(!is_stopped, egui::Button::new("\u{25A0}"))  // Stop symbol
@@ -1141,7 +1137,7 @@ impl EditorInner {
         }
 
         // Play button
-        let play_text = if is_paused { "\u{25B6}" } else { "\u{25B6}" };  // Play symbol
+        let play_text = "\u{25B6}";  // Play symbol
         let play_hover = if is_paused { "Resume" } else { "Play (F5)" };
         if ui.add_enabled(!is_playing, egui::Button::new(play_text))
             .on_hover_text(play_hover)

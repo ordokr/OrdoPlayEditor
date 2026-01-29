@@ -573,9 +573,9 @@ impl PhysicsWorld {
             body.rotation = body.rotation + body.angular_velocity * dt;
 
             // Normalize rotation to 0-360
-            body.rotation.x = body.rotation.x % 360.0;
-            body.rotation.y = body.rotation.y % 360.0;
-            body.rotation.z = body.rotation.z % 360.0;
+            body.rotation.x %= 360.0;
+            body.rotation.y %= 360.0;
+            body.rotation.z %= 360.0;
         }
     }
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! OrdoPlay Editor - State-of-the-Art Game Engine Editor
+//! `OrdoPlay` Editor - State-of-the-Art Game Engine Editor
 //!
 //! A comprehensive game development environment featuring:
 //! - Viewport with 3D rendering
@@ -13,8 +13,8 @@
 //! ## Architecture
 //!
 //! The editor is built as a standalone application that communicates with
-//! the OrdoPlay runtime via shared crates. It uses egui for UI with
-//! egui_dock for panel docking.
+//! the `OrdoPlay` runtime via shared crates. It uses egui for UI with
+//! `egui_dock` for panel docking.
 
 mod app;
 mod audio;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Node graph framework for OrdoPlay Editor.
+//! Node graph framework for `OrdoPlay` Editor.
 //!
 //! This crate provides a unified graph framework that powers:
 //! - Material/Shader graphs

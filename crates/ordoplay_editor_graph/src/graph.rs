@@ -94,11 +94,10 @@ impl Graph {
         }
 
         // Check for existing connection to this input (if not multi-connect)
-        if !target_port.multi_connect {
-            if self.connections.values().any(|c| c.to_port == to_port) {
+        if !target_port.multi_connect
+            && self.connections.values().any(|c| c.to_port == to_port) {
                 return Err(ConnectionError::PortAlreadyConnected(to_port));
             }
-        }
 
         // Prevent self-loops
         if from_node == to_node {

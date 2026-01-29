@@ -330,7 +330,7 @@ impl Shortcut {
 
     /// Parse a shortcut from a display string (e.g., "Ctrl+S", "F2", "Ctrl+Shift+Z")
     pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
+        let parts: Vec<&str> = s.split('+').map(str::trim).collect();
         if parts.is_empty() {
             return None;
         }
@@ -356,7 +356,7 @@ impl Shortcut {
         Some(Self { key, modifiers })
     }
 
-    /// Parse a key name to egui::Key
+    /// Parse a key name to `egui::Key`
     fn parse_key(s: &str) -> Option<egui::Key> {
         let lower = s.to_lowercase();
         match lower.as_str() {
@@ -472,7 +472,7 @@ pub struct ShortcutRegistry {
     bindings: HashMap<Shortcut, ShortcutBinding>,
     /// Lookup from command ID to shortcuts
     command_shortcuts: HashMap<&'static str, Vec<Shortcut>>,
-    /// User customizations (command_id -> new shortcut)
+    /// User customizations (`command_id` -> new shortcut)
     customizations: HashMap<String, Option<Shortcut>>,
 }
 
@@ -557,7 +557,7 @@ impl ShortcutRegistry {
         self.bindings.insert(shortcut, binding);
         self.command_shortcuts
             .entry(command_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(shortcut);
     }
 
@@ -583,7 +583,7 @@ impl ShortcutRegistry {
 
     /// Get display string for a command's primary shortcut
     pub fn get_shortcut_display(&self, command_id: &str) -> Option<String> {
-        self.get_primary_shortcut(command_id).map(|s| s.display())
+        self.get_primary_shortcut(command_id).map(Shortcut::display)
     }
 
     /// Check which command (if any) is triggered by current input
@@ -621,7 +621,7 @@ impl ShortcutRegistry {
         // Add new shortcut if provided
         if let Some(shortcut) = new_shortcut {
             // Find the static command_id reference
-            for (&static_id, _) in &self.command_shortcuts {
+            for &static_id in self.command_shortcuts.keys() {
                 if static_id == command_id {
                     let binding = ShortcutBinding {
                         command_id: static_id,
@@ -800,16 +800,14 @@ impl CommandPalette {
 
                 // Handle keyboard navigation
                 ui.input(|i| {
-                    if i.key_pressed(egui::Key::ArrowDown) {
-                        if self.selected_index < commands.len().saturating_sub(1) {
+                    if i.key_pressed(egui::Key::ArrowDown)
+                        && self.selected_index < commands.len().saturating_sub(1) {
                             self.selected_index += 1;
                         }
-                    }
-                    if i.key_pressed(egui::Key::ArrowUp) {
-                        if self.selected_index > 0 {
+                    if i.key_pressed(egui::Key::ArrowUp)
+                        && self.selected_index > 0 {
                             self.selected_index -= 1;
                         }
-                    }
                     if i.key_pressed(egui::Key::Enter) {
                         if let Some(cmd) = commands.get(self.selected_index) {
                             self.pending_command = Some(cmd.id);

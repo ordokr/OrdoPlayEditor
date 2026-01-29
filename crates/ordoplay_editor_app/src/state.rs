@@ -1543,9 +1543,8 @@ impl EditorState {
 
     /// Exit prefab editing mode without saving
     pub fn exit_prefab_edit_mode(&mut self, save: bool) -> Result<(), String> {
-        let editing_state = match self.editing_prefab.take() {
-            Some(state) => state,
-            None => return Err("Not in prefab edit mode".to_string()),
+        let Some(editing_state) = self.editing_prefab.take() else {
+            return Err("Not in prefab edit mode".to_string());
         };
 
         if save && editing_state.prefab_dirty {

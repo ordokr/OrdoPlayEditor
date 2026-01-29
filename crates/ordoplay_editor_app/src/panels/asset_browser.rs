@@ -393,7 +393,7 @@ impl AssetBrowserPanel {
         // Limit recursion depth to prevent performance issues
         if depth < 5 {
             if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.filter_map(|e| e.ok()) {
+                for entry in entries.filter_map(Result::ok) {
                     let entry_path = entry.path();
                     if entry_path.is_dir() {
                         // Skip hidden directories
@@ -428,7 +428,7 @@ impl AssetBrowserPanel {
         }
 
         if let Ok(entries) = std::fs::read_dir(&self.current_path) {
-            for entry in entries.filter_map(|e| e.ok()) {
+            for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
                 let name = path
                     .file_name()
@@ -826,11 +826,10 @@ impl AssetBrowserPanel {
                     self.search_focused = false;
                 }
 
-                if !self.search.is_empty() {
-                    if ui.small_button("X").clicked() {
+                if !self.search.is_empty()
+                    && ui.small_button("X").clicked() {
                         self.search.clear();
                     }
-                }
             });
         });
 
@@ -1177,7 +1176,7 @@ impl AssetBrowserPanel {
 
     /// Render a thumbnail for the given path in the given rect
     /// Returns true if a thumbnail was rendered, false if fallback to icon is needed
-    fn render_thumbnail(&self, ui: &mut egui::Ui, path: &PathBuf, rect: egui::Rect) -> bool {
+    fn render_thumbnail(&self, ui: &mut egui::Ui, path: &std::path::Path, rect: egui::Rect) -> bool {
         match self.thumbnail_manager.get_state(path) {
             ThumbnailState::Ready(texture_id) => {
                 // Draw the thumbnail image
@@ -1243,18 +1242,16 @@ impl AssetBrowserPanel {
 
     fn matches_filter(&self, asset: &AssetEntry) -> bool {
         // Search filter
-        if !self.search.is_empty() {
-            if !asset.name.to_lowercase().contains(&self.search.to_lowercase()) {
+        if !self.search.is_empty()
+            && !asset.name.to_lowercase().contains(&self.search.to_lowercase()) {
                 return false;
             }
-        }
 
         // Type filter
-        if self.filter != AssetType::All && !asset.is_folder {
-            if asset.asset_type != self.filter {
+        if self.filter != AssetType::All && !asset.is_folder
+            && asset.asset_type != self.filter {
                 return false;
             }
-        }
 
         true
     }
@@ -1401,7 +1398,7 @@ impl AssetBrowserPanel {
         });
     }
 
-    fn open_asset(&mut self, state: &mut EditorState, path: &PathBuf) {
+    fn open_asset(&mut self, state: &mut EditorState, path: &std::path::Path) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let asset_type = AssetType::from_extension(ext);
 
@@ -1433,7 +1430,7 @@ impl AssetBrowserPanel {
             }
             AssetType::Prefab => {
                 // Set selected asset for drag-drop or inspector view
-                state.selected_asset = Some(path.clone());
+                state.selected_asset = Some(path.to_path_buf());
                 tracing::info!("Selected prefab: {}", path.display());
             }
             _ => {

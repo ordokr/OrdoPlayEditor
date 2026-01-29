@@ -599,10 +599,7 @@ impl GraphEditorState {
         let node_ids: Vec<_> = graph.node_ids().collect();
 
         for node_id in node_ids {
-            let node = match graph.node(node_id) {
-                Some(n) => n,
-                None => continue,
-            };
+            let Some(node) = graph.node(node_id) else { continue };
 
             let is_selected = self.selected_nodes.contains(&node.id);
             let node_rect = self.get_node_rect(node);

@@ -264,9 +264,8 @@ impl ProfilerPanel {
 
             if ui.button(icon).on_hover_text(tooltip).clicked() {
                 self.capture_mode = match self.capture_mode {
-                    CaptureMode::Continuous => CaptureMode::Paused,
                     CaptureMode::Paused => CaptureMode::Continuous,
-                    CaptureMode::SingleFrame => CaptureMode::Paused,
+                    CaptureMode::Continuous | CaptureMode::SingleFrame => CaptureMode::Paused,
                 };
             }
 

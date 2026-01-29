@@ -101,14 +101,12 @@ impl PortType {
 
         // Implicit conversions
         match (self, other) {
-            // Numeric conversions
-            (Self::Int, Self::Float) | (Self::Float, Self::Int) => true,
-            // Vector conversions
-            (Self::Float, Self::Vector2 | Self::Vector3 | Self::Vector4) => true,
-            (Self::Vector2, Self::Vector3 | Self::Vector4) => true,
-            (Self::Vector3, Self::Vector4) => true,
-            // Color conversions
-            (Self::Color, Self::Vector4) | (Self::Vector4, Self::Color) => true,
+            // Numeric, vector, and color conversions
+            (Self::Int, Self::Float) | (Self::Float, Self::Int)
+            | (Self::Float, Self::Vector2 | Self::Vector3 | Self::Vector4)
+            | (Self::Vector2, Self::Vector3 | Self::Vector4)
+            | (Self::Vector3, Self::Vector4)
+            | (Self::Color, Self::Vector4) | (Self::Vector4, Self::Color) => true,
             // No other implicit conversions
             _ => false,
         }

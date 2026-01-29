@@ -21,7 +21,7 @@ pub enum GizmoAxis {
 struct GizmoDragState {
     /// Which axis is being dragged
     axis: GizmoAxis,
-    /// Starting transforms for all selected entities (entity_id, transform)
+    /// Starting transforms for all selected entities (`entity_id`, transform)
     start_transforms: Vec<(EntityId, crate::state::Transform)>,
     /// Starting mouse position
     start_mouse: egui::Pos2,

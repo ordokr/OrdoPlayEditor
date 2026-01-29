@@ -68,7 +68,7 @@ where
             level,
             message,
             target: Some(meta.target().to_string()),
-            file: meta.file().map(|s| s.to_string()),
+            file: meta.file().map(ToString::to_string),
             line: meta.line(),
         });
     }
@@ -104,7 +104,7 @@ impl tracing::field::Visit for MessageVisitor {
     }
 }
 
-/// Format a SystemTime as HH:MM:SS
+/// Format a `SystemTime` as HH:MM:SS
 fn format_system_time(time: &std::time::SystemTime) -> String {
     let duration = time
         .duration_since(std::time::UNIX_EPOCH)
@@ -159,9 +159,7 @@ impl LogLevel {
 
     fn bg_color(&self) -> egui::Color32 {
         match self {
-            Self::Trace => egui::Color32::TRANSPARENT,
-            Self::Debug => egui::Color32::TRANSPARENT,
-            Self::Info => egui::Color32::TRANSPARENT,
+            Self::Trace | Self::Debug | Self::Info => egui::Color32::TRANSPARENT,
             Self::Warn => egui::Color32::from_rgba_unmultiplied(255, 200, 80, 20),
             Self::Error => egui::Color32::from_rgba_unmultiplied(255, 100, 100, 30),
         }
@@ -438,11 +436,10 @@ impl ConsolePanel {
                     .desired_width(150.0),
             );
 
-            if !self.search.is_empty() {
-                if ui.button("x").on_hover_text("Clear search").clicked() {
+            if !self.search.is_empty()
+                && ui.button("x").on_hover_text("Clear search").clicked() {
                     self.search.clear();
                 }
-            }
 
             ui.separator();
 
@@ -467,11 +464,10 @@ impl ConsolePanel {
                 return false;
             }
             // Filter by search
-            if !self.search.is_empty() {
-                if !entry.message.to_lowercase().contains(&self.search.to_lowercase()) {
+            if !self.search.is_empty()
+                && !entry.message.to_lowercase().contains(&self.search.to_lowercase()) {
                     return false;
                 }
-            }
             true
         }).collect();
 
@@ -583,15 +579,14 @@ impl ConsolePanel {
             );
 
             // Handle enter key
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if !self.command_input.is_empty() {
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && !self.command_input.is_empty() {
                     let command = self.command_input.clone();
                     self.execute_command(&command);
                     self.command_history.push(command);
                     self.command_input.clear();
                     self.history_index = None;
                 }
-            }
 
             // Handle up/down for history
             if response.has_focus() {
@@ -699,7 +694,7 @@ impl ConsolePanel {
                 } else {
                     self.log(LogLevel::Info, "Command history:");
                     // Clone to avoid borrow conflict
-                    let history: Vec<_> = self.command_history.iter().cloned().collect();
+                    let history: Vec<_> = self.command_history.to_vec();
                     for (i, cmd) in history.iter().enumerate() {
                         self.log(LogLevel::Info, format!("  {}: {}", i + 1, cmd));
                     }

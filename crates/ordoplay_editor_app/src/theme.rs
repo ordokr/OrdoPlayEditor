@@ -93,13 +93,12 @@ impl AccentColor {
     /// Get the RGB color value
     pub fn color(&self) -> Color32 {
         match self {
-            AccentColor::Blue => Color32::from_rgb(66, 133, 244),
             AccentColor::Purple => Color32::from_rgb(156, 39, 176),
             AccentColor::Green => Color32::from_rgb(76, 175, 80),
             AccentColor::Orange => Color32::from_rgb(255, 152, 0),
             AccentColor::Red => Color32::from_rgb(244, 67, 54),
             AccentColor::Teal => Color32::from_rgb(0, 150, 136),
-            AccentColor::Custom => Color32::from_rgb(66, 133, 244), // Default to blue
+            AccentColor::Blue | AccentColor::Custom => Color32::from_rgb(66, 133, 244),
         }
     }
 }
@@ -294,7 +293,7 @@ pub struct EditorTheme {
     pub preset: ThemePreset,
     /// Accent color preset
     pub accent_preset: AccentColor,
-    /// Custom accent color (when accent_preset is Custom)
+    /// Custom accent color (when `accent_preset` is Custom)
     pub custom_accent: Color32,
     /// Theme colors
     pub colors: ThemeColors,
@@ -381,10 +380,10 @@ impl EditorTheme {
 
     /// Convert to egui Style
     pub fn to_egui_style(&self) -> Style {
-        let mut style = Style::default();
-
-        // Apply visuals based on theme
-        style.visuals = self.to_egui_visuals();
+        let mut style = Style {
+            visuals: self.to_egui_visuals(),
+            ..Style::default()
+        };
 
         // Apply spacing
         style.spacing.item_spacing = egui::vec2(self.item_spacing, self.item_spacing);

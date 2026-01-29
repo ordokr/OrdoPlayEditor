@@ -35,21 +35,14 @@ pub enum ViewMode {
 
 /// Selection state
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct Selection {
     /// Selected tracks
     pub tracks: HashSet<TrackId>,
-    /// Selected keyframes (track_id, keyframe_id)
+    /// Selected keyframes (`track_id`, `keyframe_id`)
     pub keyframes: HashSet<(TrackId, KeyframeId)>,
 }
 
-impl Default for Selection {
-    fn default() -> Self {
-        Self {
-            tracks: HashSet::new(),
-            keyframes: HashSet::new(),
-        }
-    }
-}
 
 /// Drag operation state
 #[derive(Debug, Clone)]
@@ -707,11 +700,10 @@ impl SequencerState {
             }
         }
 
-        if response.drag_stopped_by(egui::PointerButton::Middle) {
-            if matches!(self.drag_op, DragOperation::Pan { .. }) {
+        if response.drag_stopped_by(egui::PointerButton::Middle)
+            && matches!(self.drag_op, DragOperation::Pan { .. }) {
                 self.drag_op = DragOperation::None;
             }
-        }
     }
 }
 

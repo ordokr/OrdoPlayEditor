@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Timeline/sequencer for OrdoPlay Editor.
+//! Timeline/sequencer for `OrdoPlay` Editor.
 //!
 //! This crate provides cinematic and gameplay sequencing:
 //! - Transform animation tracks

@@ -2,7 +2,7 @@
 //! Viewport 3D renderer for the editor.
 //!
 //! This module provides off-screen rendering for the viewport panel,
-//! which can later be replaced with ordoplay_render when available.
+//! which can later be replaced with `ordoplay_render` when available.
 
 use egui_wgpu::wgpu;
 

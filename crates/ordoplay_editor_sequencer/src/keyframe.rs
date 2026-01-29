@@ -23,10 +23,12 @@ impl Default for KeyframeId {
 
 /// Interpolation mode between keyframes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum InterpolationMode {
     /// Constant (step)
     Constant,
     /// Linear interpolation
+    #[default]
     Linear,
     /// Cubic bezier interpolation
     Bezier,
@@ -34,11 +36,6 @@ pub enum InterpolationMode {
     Auto,
 }
 
-impl Default for InterpolationMode {
-    fn default() -> Self {
-        Self::Linear
-    }
-}
 
 /// Value stored in a keyframe
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -130,7 +130,7 @@ impl Prefab {
         }
     }
 
-    /// Convert an EntityData to a PrefabEntity recursively
+    /// Convert an `EntityData` to a `PrefabEntity` recursively
     fn entity_to_prefab_entity(
         entity: &EntityData,
         all_entities: &HashMap<EntityId, EntityData>,
