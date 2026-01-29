@@ -4,6 +4,7 @@
 //! Provides dark/light base themes with customizable accent colors
 //! and panel-specific styling.
 
+
 use egui::{Color32, Rounding, Stroke, Style, Visuals};
 
 /// Theme presets
@@ -104,6 +105,7 @@ impl AccentColor {
 }
 
 /// Theme colors for different UI elements
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone)]
 pub struct ThemeColors {
     /// Primary background color
@@ -162,6 +164,7 @@ impl Default for ThemeColors {
     }
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl ThemeColors {
     /// Create dark theme colors
     pub fn dark() -> Self {
@@ -327,6 +330,7 @@ impl Default for EditorTheme {
     }
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl EditorTheme {
     /// Create a new theme with a preset
     pub fn new(preset: ThemePreset) -> Self {

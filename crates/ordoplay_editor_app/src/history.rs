@@ -4,6 +4,7 @@
 //! This is a standalone implementation of the undo/redo system
 //! based on the patterns from ordoplay_editor.
 
+
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,6 +36,7 @@ pub type Result<T> = std::result::Result<T, HistoryError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OperationID(u64);
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl OperationID {
     /// Create a new operation ID
     pub fn new(id: u64) -> Self {
@@ -163,12 +165,14 @@ impl OperationGroup {
     }
 
     /// Get operation count
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn count(&self) -> usize {
         self.operations.len()
     }
 }
 
 /// History statistics
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HistoryStats {
     /// Total operations in undo stack
@@ -280,11 +284,13 @@ impl History {
     }
 
     /// Get undo stack depth
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn undo_depth(&self) -> usize {
         self.undo_stack.len()
     }
 
     /// Get redo stack depth
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn redo_depth(&self) -> usize {
         self.redo_stack.len()
     }
@@ -297,6 +303,7 @@ impl History {
     }
 
     /// Get history statistics
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn stats(&self) -> HistoryStats {
         HistoryStats {
             undo_count: self.undo_stack.len(),

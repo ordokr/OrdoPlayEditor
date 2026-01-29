@@ -70,6 +70,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 tokio = { version = "1.0", features = ["rt-multi-thread", "sync", "fs"] }
 futures = "0.3"
 
+# File watching
+notify = "7.0"
+notify-debouncer-full = "0.4"
+
 [profile.dev]
 opt-level = 1
 

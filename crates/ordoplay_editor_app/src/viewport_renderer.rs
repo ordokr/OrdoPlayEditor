@@ -5,7 +5,6 @@
 //! which can later be replaced with ordoplay_render when available.
 
 use egui_wgpu::wgpu;
-use std::sync::Arc;
 
 /// Simple vertex for 3D rendering
 #[repr(C)]
@@ -20,7 +19,7 @@ impl Vertex {
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            array_stride: size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRIBS,
         }
@@ -397,8 +396,9 @@ impl ViewportRenderer {
     }
 
     /// Render the viewport scene
+    #[allow(unsafe_code)] // Workaround for wgpu 23 lifetime issue with RenderPass
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, show_grid: bool) {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Viewport Encoder"),
         });
 
@@ -456,6 +456,7 @@ impl ViewportRenderer {
     }
 
     /// Get the render texture view for egui integration
+    #[allow(dead_code)]
     pub fn get_texture_view(&self) -> &wgpu::TextureView {
         &self.render_view
     }
@@ -480,14 +481,10 @@ impl ViewportRenderer {
     }
 
     /// Get the current size
+    #[allow(dead_code)]
     pub fn size(&self) -> [u32; 2] {
         self.size
     }
-}
-
-/// Trait for buffer initialization (normally from wgpu::util)
-trait DeviceExt {
-    fn create_buffer_init(&self, desc: &wgpu::util::BufferInitDescriptor) -> wgpu::Buffer;
 }
 
 // Re-export for use

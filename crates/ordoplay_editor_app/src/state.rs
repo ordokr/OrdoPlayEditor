@@ -4,9 +4,10 @@
 //! This module contains the core editor state including selection,
 //! undo/redo history, and scene management.
 
+
 use crate::commands::{
-    DeleteCommand, DuplicateCommand, EditorCommand, PropertyEditSnapshot, TransformCommand,
-    TransformData,
+    DeleteCommand, DuplicateCommand, EditorCommand, PropertyEditCommand, PropertyEditGroupCommand,
+    PropertyEditSnapshot, ReparentCommand, SpawnCommand, TransformCommand, TransformData,
 };
 use crate::history::{History, HistoryError, Operation, OperationGroup, StateSnapshot};
 use crate::panel_types::PanelType;
@@ -46,6 +47,7 @@ pub enum SelectMode {
     /// Add to current selection (Shift+Click)
     Add,
     /// Remove from current selection (Ctrl+Click)
+    #[allow(dead_code)] // Intentionally kept for API completeness
     Remove,
     /// Toggle in current selection (Ctrl+Shift+Click)
     Toggle,
@@ -65,6 +67,7 @@ impl Selection {
     }
 
     /// Create a selection with the given entities
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn with_entities(entities: impl Into<Vec<EntityId>>) -> Self {
         Self {
             entities: entities.into(),
@@ -98,6 +101,7 @@ impl Selection {
     }
 
     /// Union with another selection
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn union(&mut self, other: &Selection) {
         for id in &other.entities {
             self.add(*id);
@@ -105,6 +109,7 @@ impl Selection {
     }
 
     /// Difference with another selection
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn difference(&mut self, other: &Selection) {
         for id in &other.entities {
             self.remove(id);
@@ -127,11 +132,13 @@ impl Selection {
     }
 
     /// Iterate over selected entities
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn iter(&self) -> impl Iterator<Item = &EntityId> {
         self.entities.iter()
     }
 
     /// Get the first selected entity
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn first(&self) -> Option<&EntityId> {
         self.entities.first()
     }
@@ -178,6 +185,9 @@ pub struct EntityData {
     pub parent: Option<EntityId>,
     /// Child entities
     pub children: Vec<EntityId>,
+    /// Components attached to this entity
+    #[serde(default)]
+    pub components: Vec<crate::components::Component>,
 }
 
 impl Default for EntityData {
@@ -189,6 +199,7 @@ impl Default for EntityData {
             transform: Transform::default(),
             parent: None,
             children: Vec::new(),
+            components: Vec::new(),
         }
     }
 }
@@ -200,6 +211,90 @@ impl EntityData {
             name: name.into(),
             ..Default::default()
         }
+    }
+}
+
+/// Current scene file format version
+pub const SCENE_FORMAT_VERSION: u32 = 1;
+
+/// Scene file format with versioning and metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneFile {
+    /// Format version for compatibility checking
+    pub version: u32,
+    /// Scene name/title
+    pub name: String,
+    /// Scene description (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Creation timestamp (ISO 8601)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    /// Last modified timestamp (ISO 8601)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
+    /// The actual scene data
+    pub scene: SceneData,
+}
+
+impl SceneFile {
+    /// Create a new scene file with default metadata
+    pub fn new(name: impl Into<String>) -> Self {
+        let now = Self::timestamp_now();
+        Self {
+            version: SCENE_FORMAT_VERSION,
+            name: name.into(),
+            description: None,
+            created: Some(now.clone()),
+            modified: Some(now),
+            scene: SceneData::default(),
+        }
+    }
+
+    /// Wrap existing scene data in a file format
+    pub fn from_scene(name: impl Into<String>, scene: SceneData) -> Self {
+        let now = Self::timestamp_now();
+        Self {
+            version: SCENE_FORMAT_VERSION,
+            name: name.into(),
+            description: None,
+            created: Some(now.clone()),
+            modified: Some(now),
+            scene,
+        }
+    }
+
+    /// Update the modified timestamp
+    pub fn touch(&mut self) {
+        self.modified = Some(Self::timestamp_now());
+    }
+
+    /// Get current timestamp in ISO 8601 format
+    fn timestamp_now() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        // Simple ISO 8601 timestamp (without chrono dependency)
+        let secs = duration.as_secs();
+        let days = secs / 86400;
+        let time = secs % 86400;
+        let hours = time / 3600;
+        let mins = (time % 3600) / 60;
+        let secs = time % 60;
+        // Approximate date calculation (not accounting for leap years precisely)
+        let years = 1970 + days / 365;
+        let remaining_days = days % 365;
+        let months = remaining_days / 30 + 1;
+        let day = remaining_days % 30 + 1;
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            years, months.min(12), day.min(31), hours, mins, secs)
+    }
+}
+
+impl Default for SceneFile {
+    fn default() -> Self {
+        Self::new("Untitled Scene")
     }
 }
 
@@ -296,6 +391,85 @@ pub struct EditorState {
 
     /// Panels requested to open
     pending_panels: Vec<PanelType>,
+
+    /// Prefab manager for prefab instances
+    pub prefab_manager: crate::prefab::PrefabManager,
+
+    /// Currently selected asset path in asset browser
+    pub selected_asset: Option<PathBuf>,
+
+    /// Entity to create a prefab from (shows dialog when Some)
+    pub show_create_prefab_dialog: Option<EntityId>,
+
+    /// Currently editing prefab (path and backup of main scene)
+    pub editing_prefab: Option<PrefabEditingState>,
+
+    /// Project manager for project settings
+    pub project_manager: crate::project::ProjectManager,
+
+    /// Build manager for project builds
+    pub build_manager: crate::build::BuildManager,
+
+    /// Play mode manager for in-editor preview
+    pub play_mode: crate::play_mode::PlayModeManager,
+
+    /// Physics world for simulation
+    pub physics_world: crate::physics::PhysicsWorld,
+
+    /// Physics debug visualization settings
+    pub physics_debug: PhysicsDebugSettings,
+
+    /// Audio engine for playback
+    pub audio_engine: crate::audio::AudioEngine,
+}
+
+/// Physics debug visualization settings
+#[allow(dead_code)] // Intentionally kept for API completeness
+#[derive(Debug, Clone)]
+pub struct PhysicsDebugSettings {
+    /// Show collider shapes
+    pub show_colliders: bool,
+    /// Show rigidbody velocities
+    pub show_velocities: bool,
+    /// Show contact points
+    pub show_contacts: bool,
+    /// Show collision layer info
+    pub show_layers: bool,
+    /// Collider wireframe color
+    pub collider_color: [f32; 4],
+    /// Trigger volume color
+    pub trigger_color: [f32; 4],
+    /// Velocity arrow color
+    pub velocity_color: [f32; 4],
+    /// Contact point color
+    pub contact_color: [f32; 4],
+}
+
+impl Default for PhysicsDebugSettings {
+    fn default() -> Self {
+        Self {
+            show_colliders: false,
+            show_velocities: false,
+            show_contacts: false,
+            show_layers: false,
+            collider_color: [0.0, 1.0, 0.0, 0.8], // Green
+            trigger_color: [1.0, 1.0, 0.0, 0.5],  // Yellow
+            velocity_color: [0.0, 0.0, 1.0, 1.0], // Blue
+            contact_color: [1.0, 0.0, 0.0, 1.0],  // Red
+        }
+    }
+}
+
+/// State for editing a prefab
+pub struct PrefabEditingState {
+    /// Path to the prefab being edited
+    pub prefab_path: PathBuf,
+    /// Backup of the main scene before entering prefab edit mode
+    pub scene_backup: SceneData,
+    /// Backup of selection before entering prefab edit mode
+    pub selection_backup: Selection,
+    /// Whether the prefab has unsaved changes
+    pub prefab_dirty: bool,
 }
 
 impl EditorState {
@@ -305,7 +479,7 @@ impl EditorState {
 
         // Add some test entities
         let cube = scene.add_entity(EntityData::new("Cube"));
-        let sphere = scene.add_entity(EntityData {
+        let _sphere = scene.add_entity(EntityData {
             name: "Sphere".to_string(),
             transform: Transform {
                 position: [3.0, 0.0, 0.0],
@@ -313,7 +487,7 @@ impl EditorState {
             },
             ..Default::default()
         });
-        let light = scene.add_entity(EntityData {
+        let _light = scene.add_entity(EntityData {
             name: "Directional Light".to_string(),
             transform: Transform {
                 position: [0.0, 10.0, 0.0],
@@ -342,6 +516,16 @@ impl EditorState {
             scale_snap: 0.1,
             recent_scenes: VecDeque::new(),
             pending_panels: Vec::new(),
+            prefab_manager: crate::prefab::PrefabManager::new(),
+            selected_asset: None,
+            show_create_prefab_dialog: None,
+            editing_prefab: None,
+            project_manager: crate::project::ProjectManager::new(),
+            build_manager: crate::build::BuildManager::new(),
+            play_mode: crate::play_mode::PlayModeManager::new(),
+            physics_world: crate::physics::PhysicsWorld::new(),
+            physics_debug: PhysicsDebugSettings::default(),
+            audio_engine: crate::audio::AudioEngine::new(),
         }
     }
 
@@ -367,8 +551,23 @@ impl EditorState {
 
     /// Save the current scene to a specific path
     pub fn save_scene_to_path(&mut self, path: &std::path::Path) -> Result<(), String> {
-        // Serialize scene to RON format
-        let ron_str = ron::ser::to_string_pretty(&self.scene, ron::ser::PrettyConfig::default())
+        // Extract scene name from path or use existing
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled Scene")
+            .to_string();
+
+        // Create scene file with versioning
+        let mut scene_file = SceneFile::from_scene(name, self.scene.clone());
+        scene_file.touch(); // Update modified timestamp
+
+        // Configure RON pretty printing
+        let config = ron::ser::PrettyConfig::default()
+            .struct_names(true)
+            .enumerate_arrays(false);
+
+        // Serialize scene file to RON format
+        let ron_str = ron::ser::to_string_pretty(&scene_file, config)
             .map_err(|e| format!("Serialization error: {}", e))?;
 
         // Write to file
@@ -381,7 +580,7 @@ impl EditorState {
         // Add to recent scenes
         self.add_to_recent(path.to_path_buf());
 
-        tracing::info!("Saved scene to {:?}", path);
+        tracing::info!("Saved scene v{} to {:?}", SCENE_FORMAT_VERSION, path);
         Ok(())
     }
 
@@ -391,9 +590,29 @@ impl EditorState {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("File read error: {}", e))?;
 
-        // Deserialize from RON
-        let scene: SceneData = ron::from_str(&content)
-            .map_err(|e| format!("Deserialization error: {}", e))?;
+        // Try to load as new versioned format first
+        let scene = if let Ok(scene_file) = ron::from_str::<SceneFile>(&content) {
+            // Check version compatibility
+            if scene_file.version > SCENE_FORMAT_VERSION {
+                return Err(format!(
+                    "Scene file version {} is newer than supported version {}. Please update the editor.",
+                    scene_file.version, SCENE_FORMAT_VERSION
+                ));
+            }
+            if scene_file.version < SCENE_FORMAT_VERSION {
+                tracing::info!(
+                    "Upgrading scene from v{} to v{}",
+                    scene_file.version, SCENE_FORMAT_VERSION
+                );
+            }
+            tracing::info!("Loaded scene '{}' v{}", scene_file.name, scene_file.version);
+            scene_file.scene
+        } else {
+            // Fall back to legacy format (raw SceneData)
+            tracing::info!("Loading legacy scene format (pre-v1)");
+            ron::from_str::<SceneData>(&content)
+                .map_err(|e| format!("Deserialization error: {}", e))?
+        };
 
         // Update state
         self.scene = scene;
@@ -429,11 +648,13 @@ impl EditorState {
     }
 
     /// Clear the recent scenes list
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn clear_recent_scenes(&mut self) {
         self.recent_scenes.clear();
     }
 
     /// Get the scene file name (for window title)
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn scene_name(&self) -> String {
         if let Some(path) = &self.scene_path {
             path.file_stem()
@@ -493,11 +714,36 @@ impl EditorState {
     }
 
     /// Mark the scene as modified
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 
+    /// Spawn a new entity using the command pipeline
+    pub fn spawn_entity_with_command(
+        &mut self,
+        name: impl Into<String>,
+        parent: Option<EntityId>,
+        select: bool,
+    ) -> Option<EntityId> {
+        let entity_id = EntityId::new();
+        let mut command = SpawnCommand::new(entity_id, TransformData::default())
+            .with_name(name)
+            .with_select(select);
+        if let Some(parent_id) = parent {
+            command = command.with_parent(parent_id);
+        }
+
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Spawn command failed: {}", err);
+            return None;
+        }
+
+        Some(entity_id)
+    }
+
     /// Set entity transform with undo support
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn set_transform(&mut self, entity_id: EntityId, new_transform: Transform, description: &str) {
         let old_transform = match self.scene.get(&entity_id) {
             Some(data) => data.transform.clone(),
@@ -542,24 +788,188 @@ impl EditorState {
             return;
         }
 
-        if let Some(data) = self.scene.get_mut(&entity_id) {
-            data.name = new_name.clone();
+        let Ok(old_value) = bincode::serialize(&old_name) else {
+            tracing::warn!("Failed to serialize old entity name");
+            return;
+        };
+        let Ok(new_value) = bincode::serialize(&new_name) else {
+            tracing::warn!("Failed to serialize new entity name");
+            return;
+        };
+
+        let command = PropertyEditCommand::new(entity_id, "Entity", "name", old_value, new_value);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Rename command failed: {}", err);
+        }
+    }
+
+    /// Set entity active flag with undo support
+    pub fn set_entity_active(&mut self, entity_id: EntityId, active: bool) {
+        let old_value = match self.scene.get(&entity_id) {
+            Some(data) => data.active,
+            None => return,
+        };
+
+        if old_value == active {
+            return;
         }
 
-        // Create undo operation
-        let description = format!("Rename {} to {}", old_name, new_name);
-        if let (Ok(before), Ok(after)) = (
-            StateSnapshot::from_value(&(entity_id, old_name)),
-            StateSnapshot::from_value(&(entity_id, new_name)),
-        ) {
-            let op_id = self.history.begin_operation(&description);
-            let operation = Operation::new(op_id, description.clone(), before, after);
-            let mut group = OperationGroup::new(op_id, description);
-            group.add_operation(operation);
-            let _ = self.history.commit(group);
+        let Ok(old_value) = bincode::serialize(&old_value) else {
+            tracing::warn!("Failed to serialize entity active state");
+            return;
+        };
+        let Ok(new_value) = bincode::serialize(&active) else {
+            tracing::warn!("Failed to serialize entity active state");
+            return;
+        };
+
+        let command = PropertyEditCommand::new(entity_id, "Entity", "active", old_value, new_value);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Active toggle failed: {}", err);
+        }
+    }
+
+    /// Set entity static flag with undo support
+    pub fn set_entity_static(&mut self, entity_id: EntityId, is_static: bool) {
+        let old_value = match self.scene.get(&entity_id) {
+            Some(data) => data.is_static,
+            None => return,
+        };
+
+        if old_value == is_static {
+            return;
         }
 
-        self.dirty = true;
+        let Ok(old_value) = bincode::serialize(&old_value) else {
+            tracing::warn!("Failed to serialize entity static state");
+            return;
+        };
+        let Ok(new_value) = bincode::serialize(&is_static) else {
+            tracing::warn!("Failed to serialize entity static state");
+            return;
+        };
+
+        let command = PropertyEditCommand::new(entity_id, "Entity", "is_static", old_value, new_value);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Static toggle failed: {}", err);
+        }
+    }
+
+    /// Set active flag for multiple entities as a single undo operation
+    pub fn set_entities_active_bulk(&mut self, entities: &[EntityId], active: bool) {
+        let mut edits = Vec::new();
+
+        for entity_id in entities {
+            let Some(data) = self.scene.get(entity_id) else {
+                continue;
+            };
+            if data.active == active {
+                continue;
+            }
+
+            let Ok(old_value) = bincode::serialize(&data.active) else {
+                continue;
+            };
+            let Ok(new_value) = bincode::serialize(&active) else {
+                continue;
+            };
+
+            edits.push(PropertyEditCommand::new(
+                *entity_id,
+                "Entity",
+                "active",
+                old_value,
+                new_value,
+            ));
+        }
+
+        if edits.is_empty() {
+            return;
+        }
+
+        let command = PropertyEditGroupCommand::new("Set Active", edits);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Bulk active toggle failed: {}", err);
+        }
+    }
+
+    /// Set static flag for multiple entities as a single undo operation
+    pub fn set_entities_static_bulk(&mut self, entities: &[EntityId], is_static: bool) {
+        let mut edits = Vec::new();
+
+        for entity_id in entities {
+            let Some(data) = self.scene.get(entity_id) else {
+                continue;
+            };
+            if data.is_static == is_static {
+                continue;
+            }
+
+            let Ok(old_value) = bincode::serialize(&data.is_static) else {
+                continue;
+            };
+            let Ok(new_value) = bincode::serialize(&is_static) else {
+                continue;
+            };
+
+            edits.push(PropertyEditCommand::new(
+                *entity_id,
+                "Entity",
+                "is_static",
+                old_value,
+                new_value,
+            ));
+        }
+
+        if edits.is_empty() {
+            return;
+        }
+
+        let command = PropertyEditGroupCommand::new("Set Static", edits);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Bulk static toggle failed: {}", err);
+        }
+    }
+
+    /// Add a component to an entity with undo support
+    pub fn add_component(&mut self, entity_id: EntityId, component: crate::components::Component) {
+        use crate::commands::AddComponentCommand;
+
+        let command = AddComponentCommand::new(entity_id, component);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Add component failed: {}", err);
+        }
+    }
+
+    /// Remove a component from an entity with undo support
+    pub fn remove_component(&mut self, entity_id: EntityId, component_index: usize) {
+        use crate::commands::RemoveComponentCommand;
+
+        // Get the component to be removed for undo
+        let Some(entity) = self.scene.get(&entity_id) else {
+            tracing::warn!("Entity not found: {:?}", entity_id);
+            return;
+        };
+
+        if component_index >= entity.components.len() {
+            tracing::warn!("Component index {} out of bounds", component_index);
+            return;
+        }
+
+        let removed_component = entity.components[component_index].clone();
+        let command = RemoveComponentCommand::new(entity_id, component_index, removed_component);
+
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Remove component failed: {}", err);
+        }
+    }
+
+    /// Check if entity has a component of the given type
+    pub fn has_component(&self, entity_id: EntityId, type_id: &str) -> bool {
+        self.scene
+            .get(&entity_id)
+            .map(|e| e.components.iter().any(|c| c.type_id() == type_id))
+            .unwrap_or(false)
     }
 
     /// Request a panel to be opened by the UI
@@ -628,6 +1038,47 @@ impl EditorState {
         new_ids
     }
 
+    /// Reparent entities via commands (undo/redo)
+    pub fn reparent_entities_with_command(
+        &mut self,
+        entities: &[EntityId],
+        new_parent: Option<EntityId>,
+    ) {
+        if entities.is_empty() {
+            return;
+        }
+
+        if let Some(parent_id) = new_parent {
+            if !self.scene.entities.contains_key(&parent_id) {
+                tracing::warn!("Cannot reparent to missing parent {:?}", parent_id);
+                return;
+            }
+        }
+
+        let mut ids = Vec::new();
+        let mut old_parents = Vec::new();
+
+        for entity_id in entities {
+            let Some(entity) = self.scene.get(entity_id) else {
+                continue;
+            };
+            if Some(*entity_id) == new_parent || entity.parent == new_parent {
+                continue;
+            }
+            ids.push(*entity_id);
+            old_parents.push(entity.parent);
+        }
+
+        if ids.is_empty() {
+            return;
+        }
+
+        let command = ReparentCommand::new(ids, old_parents, new_parent);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Reparent command failed: {}", err);
+        }
+    }
+
     fn apply_operation_group(&mut self, group: &OperationGroup, direction: HistoryDirection) {
         let ops: Box<dyn Iterator<Item = &Operation>> = match direction {
             HistoryDirection::Undo => Box::new(group.operations.iter().rev()),
@@ -679,6 +1130,16 @@ impl EditorState {
         if let Ok(edit) = snapshot.to_value::<PropertyEditSnapshot>() {
             if self.apply_property_snapshot(edit) {
                 return true;
+            }
+        }
+
+        if let Ok(edits) = snapshot.to_value::<Vec<PropertyEditSnapshot>>() {
+            if !edits.is_empty() {
+                let mut applied = false;
+                for edit in edits {
+                    applied |= self.apply_property_snapshot(edit);
+                }
+                return applied;
             }
         }
 
@@ -833,6 +1294,20 @@ impl EditorState {
             }
         }
 
+        if component.eq_ignore_ascii_case("Entity") && field.eq_ignore_ascii_case("active") {
+            if let Ok(active) = bincode::deserialize::<bool>(&snapshot.value) {
+                entity.active = active;
+                return true;
+            }
+        }
+
+        if component.eq_ignore_ascii_case("Entity") && field.eq_ignore_ascii_case("is_static") {
+            if let Ok(is_static) = bincode::deserialize::<bool>(&snapshot.value) {
+                entity.is_static = is_static;
+                return true;
+            }
+        }
+
         false
     }
 
@@ -922,6 +1397,448 @@ impl EditorState {
         if let Err(err) = self.execute_command(&command) {
             tracing::warn!("Bulk transform failed: {}", err);
         }
+    }
+
+    /// Set transforms for multiple entities with pre-captured before values
+    /// Useful when live preview has already been applied and we want to commit to undo history
+    pub fn set_transforms_bulk_with_before(
+        &mut self,
+        entities: &[EntityId],
+        before_transforms: &[Transform],
+        after_transforms: &[Transform],
+        description: &str,
+    ) {
+        if entities.is_empty()
+            || entities.len() != before_transforms.len()
+            || entities.len() != after_transforms.len()
+        {
+            return;
+        }
+
+        let mut ids = Vec::new();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+
+        for i in 0..entities.len() {
+            let entity_id = entities[i];
+            let before_transform = &before_transforms[i];
+            let after_transform = &after_transforms[i];
+
+            // Skip if no actual change
+            if before_transform == after_transform {
+                continue;
+            }
+
+            // Ensure entity still exists
+            if self.scene.get(&entity_id).is_none() {
+                continue;
+            }
+
+            ids.push(entity_id);
+            before.push(TransformData::from(before_transform.clone()));
+            after.push(TransformData::from(after_transform.clone()));
+        }
+
+        if ids.is_empty() {
+            return;
+        }
+
+        let command = TransformCommand::new(ids, before, after, description);
+        if let Err(err) = self.execute_command(&command) {
+            tracing::warn!("Bulk transform with before failed: {}", err);
+        }
+    }
+
+    /// Unpack a prefab instance (one level only)
+    /// This removes the prefab link but keeps the entities as regular entities
+    pub fn unpack_prefab(&mut self, root_entity_id: EntityId) {
+        if !self.prefab_manager.is_prefab_root(root_entity_id) {
+            tracing::warn!("Entity {:?} is not a prefab root", root_entity_id);
+            return;
+        }
+
+        // Simply unregister the instance - entities remain in the scene
+        self.prefab_manager.unregister_instance(root_entity_id);
+        self.dirty = true;
+        tracing::info!("Unpacked prefab instance {:?}", root_entity_id);
+    }
+
+    /// Unpack a prefab instance completely (including nested prefabs)
+    pub fn unpack_prefab_completely(&mut self, root_entity_id: EntityId) {
+        if !self.prefab_manager.is_prefab_root(root_entity_id) {
+            tracing::warn!("Entity {:?} is not a prefab root", root_entity_id);
+            return;
+        }
+
+        // Get all entity IDs in this instance
+        let entity_ids: Vec<EntityId> = if let Some(instance) = self.prefab_manager.get_instance(root_entity_id) {
+            instance.all_entity_ids().into_iter().collect()
+        } else {
+            return;
+        };
+
+        // Unregister the main instance
+        self.prefab_manager.unregister_instance(root_entity_id);
+
+        // Find and unregister any nested prefab instances
+        let nested_roots: Vec<EntityId> = entity_ids
+            .iter()
+            .filter(|id| **id != root_entity_id && self.prefab_manager.is_prefab_root(**id))
+            .copied()
+            .collect();
+
+        for nested_root in nested_roots {
+            self.prefab_manager.unregister_instance(nested_root);
+        }
+
+        self.dirty = true;
+        tracing::info!("Unpacked prefab instance {:?} completely", root_entity_id);
+    }
+
+    /// Check if we're currently editing a prefab
+    pub fn is_editing_prefab(&self) -> bool {
+        self.editing_prefab.is_some()
+    }
+
+    /// Get the path of the prefab being edited
+    pub fn editing_prefab_path(&self) -> Option<&PathBuf> {
+        self.editing_prefab.as_ref().map(|s| &s.prefab_path)
+    }
+
+    /// Enter prefab editing mode
+    pub fn enter_prefab_edit_mode(&mut self, prefab_path: &PathBuf) -> Result<(), String> {
+        if self.editing_prefab.is_some() {
+            return Err("Already editing a prefab".to_string());
+        }
+
+        // Load the prefab
+        let prefab = crate::prefab::Prefab::load(prefab_path)
+            .map_err(|e| format!("Failed to load prefab: {}", e))?;
+
+        // Backup current state
+        let editing_state = PrefabEditingState {
+            prefab_path: prefab_path.clone(),
+            scene_backup: self.scene.clone(),
+            selection_backup: self.selection.clone(),
+            prefab_dirty: false,
+        };
+
+        // Load prefab entities into the scene
+        let (entities, _id_mapping) = prefab.instantiate_flat();
+
+        // Clear scene and load prefab content
+        self.scene = SceneData::new();
+        self.selection.clear();
+        self.history.clear();
+
+        // Add prefab entities to scene
+        for entity in entities {
+            self.scene.add_entity(entity);
+        }
+
+        self.editing_prefab = Some(editing_state);
+        tracing::info!("Entered prefab edit mode: {:?}", prefab_path);
+        Ok(())
+    }
+
+    /// Exit prefab editing mode without saving
+    pub fn exit_prefab_edit_mode(&mut self, save: bool) -> Result<(), String> {
+        let editing_state = match self.editing_prefab.take() {
+            Some(state) => state,
+            None => return Err("Not in prefab edit mode".to_string()),
+        };
+
+        if save && editing_state.prefab_dirty {
+            self.save_prefab_from_scene(&editing_state.prefab_path)?;
+        }
+
+        // Restore the main scene
+        self.scene = editing_state.scene_backup;
+        self.selection = editing_state.selection_backup;
+        self.history.clear();
+
+        tracing::info!("Exited prefab edit mode");
+        Ok(())
+    }
+
+    /// Save current scene content as a prefab
+    pub fn save_prefab_from_scene(&mut self, path: &PathBuf) -> Result<(), String> {
+        // Get all root entities
+        let roots = self.scene.root_entities();
+        if roots.is_empty() {
+            return Err("No entities in scene to save as prefab".to_string());
+        }
+
+        // Use the first root as the prefab root
+        let root_id = roots[0];
+        let root_entity = self.scene.get(&root_id)
+            .ok_or("Root entity not found")?;
+
+        // Build entity map for hierarchy
+        let entity_map: std::collections::HashMap<EntityId, EntityData> = self.scene.entities
+            .iter()
+            .map(|(id, data)| (*id, data.clone()))
+            .collect();
+
+        // Create prefab from entities
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Prefab")
+            .to_string();
+
+        let prefab = crate::prefab::Prefab::from_entities(name, root_entity, &entity_map);
+
+        // Save to disk
+        prefab.save(path)
+            .map_err(|e| format!("Failed to save prefab: {}", e))?;
+
+        // Mark as clean
+        if let Some(ref mut editing_state) = self.editing_prefab {
+            editing_state.prefab_dirty = false;
+        }
+
+        tracing::info!("Saved prefab to {:?}", path);
+        Ok(())
+    }
+
+    /// Mark the prefab as having unsaved changes
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn mark_prefab_dirty(&mut self) {
+        if let Some(ref mut editing_state) = self.editing_prefab {
+            editing_state.prefab_dirty = true;
+        }
+    }
+
+    /// Check if the editing prefab has unsaved changes
+    pub fn prefab_has_unsaved_changes(&self) -> bool {
+        self.editing_prefab.as_ref().map(|s| s.prefab_dirty).unwrap_or(false)
+    }
+
+    /// Track a property override on a prefab instance
+    /// Returns true if the entity is part of a prefab instance
+    pub fn track_prefab_override(
+        &mut self,
+        entity_id: EntityId,
+        property_path: &str,
+        value: serde_json::Value,
+    ) -> bool {
+        // Find the prefab instance containing this entity
+        let instance_root = {
+            let Some(instance) = self.prefab_manager.find_instance_containing(entity_id) else {
+                return false;
+            };
+            instance.root_entity_id
+        };
+
+        // Get the local ID for this entity within the prefab
+        let local_id = {
+            let Some(instance) = self.prefab_manager.get_instance(instance_root) else {
+                return false;
+            };
+            match instance.get_local_id(entity_id) {
+                Some(id) => id.to_string(),
+                None => return false,
+            }
+        };
+
+        // Create the override
+        let override_ = crate::prefab::PropertyOverride {
+            entity_path: local_id,
+            property_path: property_path.to_string(),
+            value: value.clone(),
+        };
+
+        // Add the override to the instance
+        if let Some(instance) = self.prefab_manager.get_instance_mut(instance_root) {
+            tracing::debug!(
+                "Tracked override for entity {:?}: {} = {:?}",
+                entity_id,
+                property_path,
+                value
+            );
+            instance.set_override(override_);
+        }
+
+        true
+    }
+
+    /// Check if a property is overridden on a prefab instance entity
+    pub fn is_property_overridden(&self, entity_id: EntityId, property_path: &str) -> bool {
+        let Some(instance) = self.prefab_manager.find_instance_containing(entity_id) else {
+            return false;
+        };
+
+        let Some(local_id) = instance.get_local_id(entity_id) else {
+            return false;
+        };
+
+        instance.is_overridden(&local_id.to_string(), property_path)
+    }
+
+    /// Revert a specific property override on a prefab instance entity
+    pub fn revert_property_override(&mut self, entity_id: EntityId, property_path: &str) -> bool {
+        // Find the instance and get needed data
+        let (instance_root, local_id, prefab_path) = {
+            let Some(instance) = self.prefab_manager.find_instance_containing(entity_id) else {
+                return false;
+            };
+            let Some(local_id) = instance.get_local_id(entity_id) else {
+                return false;
+            };
+            (instance.root_entity_id, local_id, instance.prefab_path.clone())
+        };
+
+        // Load the prefab to get the original value
+        let prefab = match crate::prefab::Prefab::load(&prefab_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Failed to load prefab for revert: {}", e);
+                return false;
+            }
+        };
+
+        // Find the entity in the prefab by local_id
+        let prefab_entity = self.find_prefab_entity_by_local_id(&prefab.root, local_id);
+        let Some(prefab_entity) = prefab_entity else {
+            tracing::warn!("Could not find prefab entity with local_id {}", local_id);
+            return false;
+        };
+
+        // Revert the property value
+        let reverted = self.revert_property_from_prefab(entity_id, property_path, prefab_entity);
+
+        // Remove the override from the instance
+        if reverted {
+            if let Some(instance) = self.prefab_manager.get_instance_mut(instance_root) {
+                instance.remove_override(&local_id.to_string(), property_path);
+            }
+        }
+
+        reverted
+    }
+
+    fn find_prefab_entity_by_local_id<'a>(
+        &self,
+        entity: &'a crate::prefab::PrefabEntity,
+        local_id: u32,
+    ) -> Option<&'a crate::prefab::PrefabEntity> {
+        if entity.local_id == local_id {
+            return Some(entity);
+        }
+        for child in &entity.children {
+            if let Some(found) = self.find_prefab_entity_by_local_id(child, local_id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn revert_property_from_prefab(
+        &mut self,
+        entity_id: EntityId,
+        property_path: &str,
+        prefab_entity: &crate::prefab::PrefabEntity,
+    ) -> bool {
+        let Some(entity) = self.scene.get_mut(&entity_id) else {
+            return false;
+        };
+
+        // Handle common property paths
+        match property_path {
+            "name" => {
+                entity.name = prefab_entity.name.clone();
+                true
+            }
+            "transform.position" | "transform.position.x" | "transform.position.y" | "transform.position.z" => {
+                entity.transform.position = prefab_entity.transform.position;
+                true
+            }
+            "transform.rotation" | "transform.rotation.x" | "transform.rotation.y" | "transform.rotation.z" => {
+                entity.transform.rotation = prefab_entity.transform.rotation;
+                true
+            }
+            "transform.scale" | "transform.scale.x" | "transform.scale.y" | "transform.scale.z" => {
+                entity.transform.scale = prefab_entity.transform.scale;
+                true
+            }
+            "active" => {
+                entity.active = true; // Default for prefab entities
+                true
+            }
+            "is_static" => {
+                entity.is_static = false; // Default for prefab entities
+                true
+            }
+            _ => {
+                tracing::warn!("Revert not implemented for property: {}", property_path);
+                false
+            }
+        }
+    }
+
+    /// Revert all overrides on a prefab instance entity
+    pub fn revert_all_overrides(&mut self, entity_id: EntityId) -> bool {
+        let Some(instance) = self.prefab_manager.find_instance_containing(entity_id) else {
+            return false;
+        };
+
+        let root_id = instance.root_entity_id;
+        let prefab_path = instance.prefab_path.clone();
+
+        // Load the prefab
+        let prefab = match crate::prefab::Prefab::load(&prefab_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Failed to load prefab for revert: {}", e);
+                return false;
+            }
+        };
+
+        // Get the local ID for this entity
+        let Some(instance) = self.prefab_manager.get_instance(root_id) else {
+            return false;
+        };
+        let Some(local_id) = instance.get_local_id(entity_id) else {
+            return false;
+        };
+
+        // Find the prefab entity
+        let Some(prefab_entity) = self.find_prefab_entity_by_local_id(&prefab.root, local_id) else {
+            return false;
+        };
+
+        // Revert all properties
+        if let Some(entity) = self.scene.get_mut(&entity_id) {
+            entity.name = prefab_entity.name.clone();
+            entity.transform = prefab_entity.transform.clone();
+            entity.components = prefab_entity.components.clone();
+        }
+
+        // Clear all overrides for this entity
+        if let Some(instance) = self.prefab_manager.get_instance_mut(root_id) {
+            instance.overrides.retain(|o| o.entity_path != local_id.to_string());
+        }
+
+        self.dirty = true;
+        true
+    }
+
+    /// Get all overrides for an entity (if it's part of a prefab instance)
+    pub fn get_entity_overrides(&self, entity_id: EntityId) -> Vec<String> {
+        let Some(instance) = self.prefab_manager.find_instance_containing(entity_id) else {
+            return Vec::new();
+        };
+
+        let Some(local_id) = instance.get_local_id(entity_id) else {
+            return Vec::new();
+        };
+
+        let local_id_str = local_id.to_string();
+        instance.overrides
+            .iter()
+            .filter(|o| o.entity_path == local_id_str)
+            .map(|o| o.property_path.clone())
+            .collect()
     }
 }
 

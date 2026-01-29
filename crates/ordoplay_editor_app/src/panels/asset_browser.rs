@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Asset browser panel - File/asset navigation.
 
+
+use crate::file_watcher::{FileEvent, FileWatcherManager};
 use crate::panel_types::PanelType;
 use crate::state::EditorState;
 use crate::thumbnail::{ThumbnailManager, ThumbnailState};
@@ -116,6 +118,7 @@ impl AssetType {
 }
 
 /// Directory tree entry
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone)]
 pub struct DirectoryEntry {
     pub name: String,
@@ -133,7 +136,29 @@ pub struct AssetEntry {
     pub is_folder: bool,
 }
 
+/// Sorting options for assets
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortMode {
+    #[default]
+    Name,
+    DateModified,
+    Type,
+    Size,
+}
+
+impl SortMode {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::DateModified => "Date Modified",
+            Self::Type => "Type",
+            Self::Size => "Size",
+        }
+    }
+}
+
 /// The asset browser panel
+#[allow(dead_code)] // Intentionally kept for API completeness
 pub struct AssetBrowserPanel {
     /// Root assets directory
     pub root_path: PathBuf,
@@ -145,9 +170,11 @@ pub struct AssetBrowserPanel {
     pub filter: AssetType,
     /// Search query
     pub search: String,
+    /// Search field has focus
+    search_focused: bool,
     /// Selected assets
     pub selected: Vec<PathBuf>,
-    /// Mock assets in current directory
+    /// Assets in current directory (from filesystem)
     assets: Vec<AssetEntry>,
     /// Directory tree
     directory_tree: Vec<DirectoryEntry>,
@@ -169,18 +196,49 @@ pub struct AssetBrowserPanel {
     pub thumbnail_manager: ThumbnailManager,
     /// Whether to show thumbnails (vs icons)
     pub show_thumbnails: bool,
+    /// Sorting mode
+    pub sort_mode: SortMode,
+    /// Sort ascending
+    pub sort_ascending: bool,
+    /// Favorite paths (bookmarks)
+    pub favorites: Vec<PathBuf>,
+    /// Recent assets
+    pub recent_assets: Vec<PathBuf>,
+    /// Maximum recent assets to track
+    max_recent: usize,
+    /// Whether filesystem needs refresh
+    needs_refresh: bool,
+    /// Last refresh time
+    last_refresh: std::time::Instant,
+    /// File watcher for auto-refresh
+    file_watcher: Option<FileWatcherManager>,
+    /// Paths that were modified and need attention
+    modified_paths: HashSet<PathBuf>,
+    /// Path currently being renamed (inline rename mode)
+    renaming_path: Option<PathBuf>,
+    /// Buffer for the new name during inline rename
+    rename_buffer: String,
+    /// Whether the rename text field should request focus
+    rename_focus_request: bool,
+    /// Path pending deletion confirmation
+    pending_delete: Option<PathBuf>,
 }
 
 impl AssetBrowserPanel {
     /// Create a new asset browser panel
     pub fn new() -> Self {
         let root = PathBuf::from("assets");
+
+        // Initialize file watcher
+        let file_watcher = Self::create_file_watcher(&root);
+
         let mut panel = Self {
             root_path: root.clone(),
             current_path: root.clone(),
             view_mode: AssetViewMode::Grid,
             filter: AssetType::All,
             search: String::new(),
+            search_focused: false,
             selected: Vec::new(),
             assets: Vec::new(),
             directory_tree: Vec::new(),
@@ -193,12 +251,324 @@ impl AssetBrowserPanel {
             dragging_asset: None,
             thumbnail_manager: ThumbnailManager::new(),
             show_thumbnails: true,
+            sort_mode: SortMode::Name,
+            sort_ascending: true,
+            favorites: Vec::new(),
+            recent_assets: Vec::new(),
+            max_recent: 20,
+            needs_refresh: true,
+            last_refresh: std::time::Instant::now(),
+            file_watcher,
+            modified_paths: HashSet::new(),
+            renaming_path: None,
+            rename_buffer: String::new(),
+            rename_focus_request: false,
+            pending_delete: None,
         };
 
         panel.expanded_dirs.insert(root);
-        panel.build_mock_tree();
-        panel.add_mock_assets();
+        panel.refresh_filesystem();
         panel
+    }
+
+    /// Create a file watcher for the given root path
+    fn create_file_watcher(root: &PathBuf) -> Option<FileWatcherManager> {
+        if !root.exists() {
+            return None;
+        }
+
+        let mut manager = FileWatcherManager::new();
+        match manager.watch_directory(root) {
+            Ok(()) => {
+                tracing::info!("Asset file watcher started for: {:?}", root);
+                Some(manager)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start file watcher: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Poll file watcher for changes and trigger refresh if needed
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn poll_file_watcher(&mut self) {
+        let Some(ref mut watcher) = self.file_watcher else {
+            return;
+        };
+
+        let events = watcher.poll();
+        if events.is_empty() {
+            return;
+        }
+
+        // Process events
+        let mut needs_tree_refresh = false;
+        let mut needs_current_refresh = false;
+
+        for event in events {
+            match event {
+                FileEvent::Created(path) | FileEvent::Modified(path) | FileEvent::Deleted(path) => {
+                    self.modified_paths.insert(path.clone());
+
+                    // Check if this affects the current directory
+                    if let Some(parent) = path.parent() {
+                        if parent == self.current_path {
+                            needs_current_refresh = true;
+                        }
+                    }
+
+                    // Check if it's a directory change (affects tree)
+                    if path.is_dir() || !path.exists() {
+                        needs_tree_refresh = true;
+                    }
+                }
+                FileEvent::Renamed(old, new) => {
+                    self.modified_paths.insert(old.clone());
+                    self.modified_paths.insert(new.clone());
+                    needs_tree_refresh = true;
+                    needs_current_refresh = true;
+                }
+                FileEvent::Error(msg) => {
+                    tracing::warn!("File watcher error: {}", msg);
+                }
+            }
+        }
+
+        // Refresh as needed
+        if needs_tree_refresh {
+            self.scan_directory_tree();
+        }
+        if needs_current_refresh {
+            self.scan_current_directory();
+        }
+
+        // Clear modified paths after processing
+        if !self.modified_paths.is_empty() {
+            tracing::debug!(
+                "File watcher detected {} modifications",
+                self.modified_paths.len()
+            );
+        }
+    }
+
+    /// Get paths that were recently modified (for hot reload)
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn take_modified_paths(&mut self) -> HashSet<PathBuf> {
+        std::mem::take(&mut self.modified_paths)
+    }
+
+    /// Check if file watcher is active
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn has_file_watcher(&self) -> bool {
+        self.file_watcher.is_some()
+    }
+
+    /// Refresh the filesystem view
+    pub fn refresh_filesystem(&mut self) {
+        self.scan_directory_tree();
+        self.scan_current_directory();
+        self.needs_refresh = false;
+        self.last_refresh = std::time::Instant::now();
+    }
+
+    /// Scan the root directory to build the tree
+    fn scan_directory_tree(&mut self) {
+        self.directory_tree = if self.root_path.exists() {
+            vec![self.scan_directory_recursive(&self.root_path.clone(), 0)]
+        } else {
+            // Fall back to mock tree if assets folder doesn't exist
+            self.build_mock_tree_data()
+        };
+    }
+
+    fn scan_directory_recursive(&self, path: &PathBuf, depth: usize) -> DirectoryEntry {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+
+        let mut children = Vec::new();
+
+        // Limit recursion depth to prevent performance issues
+        if depth < 5 {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let entry_path = entry.path();
+                    if entry_path.is_dir() {
+                        // Skip hidden directories
+                        let dir_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
+                        if !dir_name.starts_with('.') {
+                            children.push(self.scan_directory_recursive(&entry_path, depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort children by name
+        children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        DirectoryEntry {
+            name,
+            path: path.clone(),
+            children,
+            expanded: self.expanded_dirs.contains(path),
+        }
+    }
+
+    /// Scan the current directory for assets
+    fn scan_current_directory(&mut self) {
+        self.assets.clear();
+
+        if !self.current_path.exists() {
+            // Fall back to mock assets
+            self.add_mock_assets();
+            return;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&self.current_path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                // Skip hidden files
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                let is_folder = path.is_dir();
+                let asset_type = if is_folder {
+                    AssetType::All
+                } else {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    AssetType::from_extension(ext)
+                };
+
+                self.assets.push(AssetEntry {
+                    name,
+                    path,
+                    asset_type,
+                    is_folder,
+                });
+            }
+        }
+
+        // Sort assets
+        self.sort_assets();
+    }
+
+    /// Sort assets according to current sort mode
+    fn sort_assets(&mut self) {
+        self.assets.sort_by(|a, b| {
+            // Folders always first
+            if a.is_folder != b.is_folder {
+                return if a.is_folder {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                };
+            }
+
+            let cmp = match self.sort_mode {
+                SortMode::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortMode::Type => {
+                    let type_cmp = a.asset_type.name().cmp(b.asset_type.name());
+                    if type_cmp == std::cmp::Ordering::Equal {
+                        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                    } else {
+                        type_cmp
+                    }
+                }
+                SortMode::DateModified => {
+                    // Get modification times
+                    let a_time = std::fs::metadata(&a.path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    let b_time = std::fs::metadata(&b.path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    a_time.cmp(&b_time)
+                }
+                SortMode::Size => {
+                    let a_size = std::fs::metadata(&a.path).map(|m| m.len()).unwrap_or(0);
+                    let b_size = std::fs::metadata(&b.path).map(|m| m.len()).unwrap_or(0);
+                    a_size.cmp(&b_size)
+                }
+            };
+
+            if self.sort_ascending {
+                cmp
+            } else {
+                cmp.reverse()
+            }
+        });
+    }
+
+    /// Add path to recent assets
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn add_to_recent(&mut self, path: PathBuf) {
+        // Remove if already exists
+        self.recent_assets.retain(|p| p != &path);
+        // Add to front
+        self.recent_assets.insert(0, path);
+        // Trim to max size
+        self.recent_assets.truncate(self.max_recent);
+    }
+
+    /// Toggle favorite status for a path
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn toggle_favorite(&mut self, path: PathBuf) {
+        if self.favorites.contains(&path) {
+            self.favorites.retain(|p| p != &path);
+        } else {
+            self.favorites.push(path);
+        }
+    }
+
+    /// Check if path is favorited
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn is_favorite(&self, path: &PathBuf) -> bool {
+        self.favorites.contains(path)
+    }
+
+    fn build_mock_tree_data(&self) -> Vec<DirectoryEntry> {
+        vec![
+            DirectoryEntry {
+                name: "assets".to_string(),
+                path: PathBuf::from("assets"),
+                expanded: true,
+                children: vec![
+                    DirectoryEntry {
+                        name: "models".to_string(),
+                        path: PathBuf::from("assets/models"),
+                        expanded: false,
+                        children: vec![],
+                    },
+                    DirectoryEntry {
+                        name: "textures".to_string(),
+                        path: PathBuf::from("assets/textures"),
+                        expanded: false,
+                        children: vec![],
+                    },
+                    DirectoryEntry {
+                        name: "materials".to_string(),
+                        path: PathBuf::from("assets/materials"),
+                        expanded: false,
+                        children: vec![],
+                    },
+                    DirectoryEntry {
+                        name: "scenes".to_string(),
+                        path: PathBuf::from("assets/scenes"),
+                        expanded: false,
+                        children: vec![],
+                    },
+                ],
+            },
+        ]
     }
 
     /// Update thumbnail manager with graphics context
@@ -210,74 +580,6 @@ impl AssetBrowserPanel {
         egui_renderer: &mut egui_wgpu::Renderer,
     ) {
         self.thumbnail_manager.update(device, queue, egui_renderer);
-    }
-
-    fn build_mock_tree(&mut self) {
-        self.directory_tree = vec![
-            DirectoryEntry {
-                name: "assets".to_string(),
-                path: PathBuf::from("assets"),
-                expanded: true,
-                children: vec![
-                    DirectoryEntry {
-                        name: "models".to_string(),
-                        path: PathBuf::from("assets/models"),
-                        expanded: false,
-                        children: vec![
-                            DirectoryEntry {
-                                name: "characters".to_string(),
-                                path: PathBuf::from("assets/models/characters"),
-                                expanded: false,
-                                children: vec![],
-                            },
-                            DirectoryEntry {
-                                name: "props".to_string(),
-                                path: PathBuf::from("assets/models/props"),
-                                expanded: false,
-                                children: vec![],
-                            },
-                        ],
-                    },
-                    DirectoryEntry {
-                        name: "textures".to_string(),
-                        path: PathBuf::from("assets/textures"),
-                        expanded: false,
-                        children: vec![
-                            DirectoryEntry {
-                                name: "environment".to_string(),
-                                path: PathBuf::from("assets/textures/environment"),
-                                expanded: false,
-                                children: vec![],
-                            },
-                        ],
-                    },
-                    DirectoryEntry {
-                        name: "materials".to_string(),
-                        path: PathBuf::from("assets/materials"),
-                        expanded: false,
-                        children: vec![],
-                    },
-                    DirectoryEntry {
-                        name: "shaders".to_string(),
-                        path: PathBuf::from("assets/shaders"),
-                        expanded: false,
-                        children: vec![],
-                    },
-                    DirectoryEntry {
-                        name: "scenes".to_string(),
-                        path: PathBuf::from("assets/scenes"),
-                        expanded: false,
-                        children: vec![],
-                    },
-                    DirectoryEntry {
-                        name: "audio".to_string(),
-                        path: PathBuf::from("assets/audio"),
-                        expanded: false,
-                        children: vec![],
-                    },
-                ],
-            },
-        ];
     }
 
     fn add_mock_assets(&mut self) {
@@ -371,6 +673,8 @@ impl AssetBrowserPanel {
             self.history.truncate(self.history_index);
             self.history.push(path.clone());
             self.current_path = path;
+            // Refresh the current directory contents
+            self.scan_current_directory();
         }
     }
 
@@ -379,6 +683,7 @@ impl AssetBrowserPanel {
         if self.history_index > 0 {
             self.history_index -= 1;
             self.current_path = self.history[self.history_index].clone();
+            self.scan_current_directory();
         }
     }
 
@@ -387,6 +692,7 @@ impl AssetBrowserPanel {
         if self.history_index < self.history.len() - 1 {
             self.history_index += 1;
             self.current_path = self.history[self.history_index].clone();
+            self.scan_current_directory();
         }
     }
 
@@ -402,28 +708,45 @@ impl AssetBrowserPanel {
 
     /// Render the asset browser panel
     pub fn ui(&mut self, ui: &mut egui::Ui, state: &mut EditorState) {
+        // Handle keyboard shortcuts
+        let ctrl_f_pressed = ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F));
+        let f5_pressed = ui.input(|i| i.key_pressed(egui::Key::F5));
+
+        if ctrl_f_pressed {
+            self.search_focused = true;
+        }
+
+        if f5_pressed {
+            self.refresh_filesystem();
+        }
+
         // Toolbar
         ui.horizontal(|ui| {
             // Navigation buttons
             ui.add_enabled_ui(self.can_go_back(), |ui| {
-                if ui.button("\u{f060}").on_hover_text("Back").clicked() {
+                if ui.button("<").on_hover_text("Back (Alt+Left)").clicked() {
                     self.go_back();
                 }
             });
             ui.add_enabled_ui(self.can_go_forward(), |ui| {
-                if ui.button("\u{f061}").on_hover_text("Forward").clicked() {
+                if ui.button(">").on_hover_text("Forward (Alt+Right)").clicked() {
                     self.go_forward();
                 }
             });
 
             // Up button
             ui.add_enabled_ui(self.current_path != self.root_path, |ui| {
-                if ui.button("\u{f062}").on_hover_text("Up").clicked() {
+                if ui.button("^").on_hover_text("Up (Alt+Up)").clicked() {
                     if let Some(parent) = self.current_path.parent() {
                         self.navigate_to(parent.to_path_buf());
                     }
                 }
             });
+
+            // Refresh button
+            if ui.button("R").on_hover_text("Refresh (F5)").clicked() {
+                self.refresh_filesystem();
+            }
 
             ui.separator();
 
@@ -432,10 +755,10 @@ impl AssetBrowserPanel {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // View mode toggle
-                if ui.selectable_label(self.view_mode == AssetViewMode::List, "\u{f00b}").on_hover_text("List View").clicked() {
+                if ui.selectable_label(self.view_mode == AssetViewMode::List, "List").on_hover_text("List View").clicked() {
                     self.view_mode = AssetViewMode::List;
                 }
-                if ui.selectable_label(self.view_mode == AssetViewMode::Grid, "\u{f00a}").on_hover_text("Grid View").clicked() {
+                if ui.selectable_label(self.view_mode == AssetViewMode::Grid, "Grid").on_hover_text("Grid View").clicked() {
                     self.view_mode = AssetViewMode::Grid;
                 }
 
@@ -445,6 +768,26 @@ impl AssetBrowserPanel {
                 if self.view_mode == AssetViewMode::Grid {
                     ui.add(egui::Slider::new(&mut self.icon_size, 32.0..=128.0).show_value(false));
                 }
+
+                ui.separator();
+
+                // Sort dropdown
+                let sort_text = format!("{} {}", self.sort_mode.name(), if self.sort_ascending { "^" } else { "v" });
+                egui::ComboBox::from_id_salt("asset_sort")
+                    .selected_text(sort_text)
+                    .show_ui(ui, |ui| {
+                        for mode in [SortMode::Name, SortMode::DateModified, SortMode::Type, SortMode::Size] {
+                            if ui.selectable_label(self.sort_mode == mode, mode.name()).clicked() {
+                                if self.sort_mode == mode {
+                                    self.sort_ascending = !self.sort_ascending;
+                                } else {
+                                    self.sort_mode = mode;
+                                    self.sort_ascending = true;
+                                }
+                                self.sort_assets();
+                            }
+                        }
+                    });
 
                 ui.separator();
 
@@ -461,6 +804,8 @@ impl AssetBrowserPanel {
                             AssetType::Scene,
                             AssetType::Prefab,
                             AssetType::Shader,
+                            AssetType::Script,
+                            AssetType::Font,
                         ] {
                             ui.selectable_value(&mut self.filter, filter, filter.name());
                         }
@@ -468,15 +813,21 @@ impl AssetBrowserPanel {
 
                 ui.separator();
 
-                // Search
-                ui.add(
+                // Search with keyboard focus handling
+                let search_response = ui.add(
                     egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Search...")
-                        .desired_width(120.0),
+                        .hint_text("Search (Ctrl+F)...")
+                        .desired_width(150.0),
                 );
 
+                // Focus search if Ctrl+F was pressed
+                if self.search_focused {
+                    search_response.request_focus();
+                    self.search_focused = false;
+                }
+
                 if !self.search.is_empty() {
-                    if ui.button("x").clicked() {
+                    if ui.small_button("X").clicked() {
                         self.search.clear();
                     }
                 }
@@ -708,7 +1059,7 @@ impl AssetBrowserPanel {
 
         // Apply deferred state changes
         if let Some(path) = new_path {
-            self.current_path = path;
+            self.navigate_to(path);
         }
         if let Some(path) = new_selection {
             self.selected = vec![path];
@@ -793,6 +1144,7 @@ impl AssetBrowserPanel {
                     ui.close_menu();
                 }
                 if ui.button("Show in Explorer").clicked() {
+                    Self::show_in_explorer(&asset.path);
                     ui.close_menu();
                 }
                 ui.separator();
@@ -802,93 +1154,25 @@ impl AssetBrowserPanel {
                 }
                 ui.separator();
                 if ui.button("Rename").clicked() {
+                    self.begin_rename(&asset.path);
                     ui.close_menu();
                 }
                 if ui.button("Delete").clicked() {
+                    self.pending_delete = Some(asset.path.clone());
                     ui.close_menu();
                 }
             });
         }
-    }
 
-    fn render_grid_item(&mut self, ui: &mut egui::Ui, asset: &AssetEntry, is_selected: bool, state: &mut EditorState) {
-        let size = egui::vec2(self.icon_size + 8.0, self.icon_size + 24.0);
+        // Handle pending delete
+        if let Some(path) = self.pending_delete.take() {
+            self.delete_asset(&path);
+        }
 
-        ui.allocate_ui(size, |ui| {
-            let response = ui.vertical_centered(|ui| {
-                // Icon area
-                let icon_rect = ui.allocate_space(egui::vec2(self.icon_size, self.icon_size)).1;
-
-                // Draw background for selection
-                if is_selected {
-                    ui.painter().rect_filled(
-                        icon_rect.expand(4.0),
-                        4.0,
-                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 80),
-                    );
-                }
-
-                // Draw icon
-                let icon = if asset.is_folder { "\u{f07b}" } else { asset.asset_type.icon() };
-                let icon_color = if asset.is_folder {
-                    egui::Color32::from_rgb(255, 200, 80)
-                } else {
-                    egui::Color32::from_rgb(180, 180, 180)
-                };
-
-                ui.painter().text(
-                    icon_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    icon,
-                    egui::FontId::proportional(self.icon_size * 0.5),
-                    icon_color,
-                );
-
-                // Name label (truncated)
-                let max_chars = (self.icon_size / 8.0) as usize;
-                let name = if asset.name.len() > max_chars {
-                    format!("{}...", &asset.name[..max_chars.saturating_sub(3)])
-                } else {
-                    asset.name.clone()
-                };
-
-                ui.label(egui::RichText::new(name).small());
-            });
-
-            // Handle clicks
-            if response.response.clicked() {
-                if asset.is_folder {
-                    self.current_path = asset.path.clone();
-                } else {
-                    self.selected = vec![asset.path.clone()];
-                }
-            }
-
-            if response.response.double_clicked() {
-                if asset.is_folder {
-                    self.current_path = asset.path.clone();
-                } else {
-                    self.open_asset(state, &asset.path);
-                }
-            }
-
-            // Context menu
-            response.response.context_menu(|ui| {
-                if ui.button("Open").clicked() {
-                    ui.close_menu();
-                }
-                if ui.button("Show in Explorer").clicked() {
-                    ui.close_menu();
-                }
-                ui.separator();
-                if ui.button("Rename").clicked() {
-                    ui.close_menu();
-                }
-                if ui.button("Delete").clicked() {
-                    ui.close_menu();
-                }
-            });
-        });
+        // Handle inline rename: render overlay/check for completion
+        if self.renaming_path.is_some() {
+            self.show_rename_ui(ui);
+        }
     }
 
     /// Render a thumbnail for the given path in the given rect
@@ -975,6 +1259,148 @@ impl AssetBrowserPanel {
         true
     }
 
+    /// Open the OS file manager and select/reveal the given path
+    fn show_in_explorer(path: &std::path::Path) {
+        let canonical = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf());
+
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,\"{}\"", canonical.display()))
+                .spawn();
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(dir) = canonical.parent() {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(dir)
+                    .spawn();
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg("-R")
+                .arg(&canonical)
+                .spawn();
+        }
+
+        tracing::info!("Show in explorer: {}", canonical.display());
+    }
+
+    /// Begin inline rename for the given path
+    fn begin_rename(&mut self, path: &std::path::Path) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.renaming_path = Some(path.to_path_buf());
+        self.rename_buffer = name;
+        self.rename_focus_request = true;
+    }
+
+    /// Finish inline rename — actually rename the file/directory on disk
+    fn finish_rename(&mut self) {
+        if let Some(old_path) = self.renaming_path.take() {
+            let new_name = self.rename_buffer.trim();
+            if new_name.is_empty() {
+                tracing::warn!("Rename cancelled: empty name");
+                return;
+            }
+            if let Some(parent) = old_path.parent() {
+                let new_path = parent.join(new_name);
+                if new_path == old_path {
+                    return; // no change
+                }
+                match std::fs::rename(&old_path, &new_path) {
+                    Ok(()) => {
+                        tracing::info!("Renamed {} -> {}", old_path.display(), new_path.display());
+                        for sel in &mut self.selected {
+                            if *sel == old_path {
+                                *sel = new_path.clone();
+                            }
+                        }
+                        self.needs_refresh = true;
+                        self.scan_current_directory();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to rename {}: {}", old_path.display(), e);
+                    }
+                }
+            }
+        }
+        self.rename_buffer.clear();
+    }
+
+    /// Cancel inline rename
+    fn cancel_rename(&mut self) {
+        self.renaming_path = None;
+        self.rename_buffer.clear();
+    }
+
+    /// Delete a file or directory
+    fn delete_asset(&mut self, path: &std::path::Path) {
+        let path_str = path.display().to_string();
+        let result = if path.is_dir() {
+            tracing::info!("Deleting directory: {}", path_str);
+            std::fs::remove_dir_all(path)
+        } else {
+            tracing::info!("Deleting file: {}", path_str);
+            std::fs::remove_file(path)
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!("Deleted: {}", path_str);
+                self.selected.retain(|p| p.as_path() != path);
+                self.needs_refresh = true;
+                self.scan_current_directory();
+            }
+            Err(e) => {
+                tracing::error!("Failed to delete {}: {}", path_str, e);
+            }
+        }
+    }
+
+    /// Show an inline rename text edit UI at the bottom of the panel area
+    fn show_rename_ui(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Rename:");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.rename_buffer)
+                    .desired_width(200.0)
+            );
+
+            if self.rename_focus_request {
+                response.request_focus();
+                self.rename_focus_request = false;
+            }
+
+            // Finish on Enter or focus lost
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.finish_rename();
+            } else if response.lost_focus() {
+                // Also finish on focus lost (clicked away)
+                self.finish_rename();
+            }
+
+            if ui.button("OK").clicked() {
+                self.finish_rename();
+            }
+            if ui.button("Cancel").clicked() {
+                self.cancel_rename();
+            }
+
+            // Escape to cancel
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.cancel_rename();
+            }
+        });
+    }
+
     fn open_asset(&mut self, state: &mut EditorState, path: &PathBuf) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let asset_type = AssetType::from_extension(ext);
@@ -996,6 +1422,19 @@ impl AssetBrowserPanel {
             AssetType::Animation => {
                 state.request_panel_open(PanelType::Sequencer);
                 tracing::info!("Opening sequencer for {}", path.display());
+            }
+            AssetType::Audio => {
+                // Preview audio clip
+                if state.audio_engine.preview_clip(path) {
+                    tracing::info!("Playing audio preview: {}", path.display());
+                } else {
+                    tracing::warn!("Failed to play audio preview: {}", path.display());
+                }
+            }
+            AssetType::Prefab => {
+                // Set selected asset for drag-drop or inspector view
+                state.selected_asset = Some(path.clone());
+                tracing::info!("Selected prefab: {}", path.display());
             }
             _ => {
                 tracing::info!("Open asset not implemented: {}", path.display());

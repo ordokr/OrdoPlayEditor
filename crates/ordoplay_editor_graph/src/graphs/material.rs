@@ -5,7 +5,7 @@
 //! compatible with ordoplay_materialx for runtime compilation to WGSL.
 
 use crate::node::{NodeCategory, NodeRegistry, NodeType};
-use crate::port::{Port, PortDirection, PortId, PortType, PortValue};
+use crate::port::{Port, PortType, PortValue};
 
 /// Create the material graph node registry with all available node types
 pub fn create_material_registry() -> NodeRegistry {

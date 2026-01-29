@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Menu definitions, command palette, and keyboard shortcuts.
 
+
 use std::collections::HashMap;
 
 /// A command that can be executed from the command palette
@@ -148,11 +149,13 @@ impl CommandRegistry {
     }
 
     /// Get a command by ID
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn get(&self, id: &str) -> Option<&Command> {
         self.by_id.get(id).map(|&idx| &self.commands[idx])
     }
 
     /// Get all commands
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn all(&self) -> &[Command] {
         &self.commands
     }
@@ -203,6 +206,7 @@ pub struct Modifiers {
     pub alt: bool,
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl Modifiers {
     /// No modifiers
     pub const NONE: Self = Self { ctrl: false, shift: false, alt: false };
@@ -260,6 +264,7 @@ pub struct Shortcut {
     pub modifiers: Modifiers,
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl Shortcut {
     /// Create a new shortcut with no modifiers
     pub const fn new(key: egui::Key) -> Self {
@@ -435,6 +440,7 @@ impl std::fmt::Display for Shortcut {
 }
 
 /// A shortcut binding maps a shortcut to a command
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone)]
 pub struct ShortcutBinding {
     /// The command ID this shortcut triggers
@@ -448,6 +454,7 @@ pub struct ShortcutBinding {
 }
 
 /// Context in which a shortcut is active
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutContext {
     /// Active only when viewport is focused
@@ -459,6 +466,7 @@ pub enum ShortcutContext {
 }
 
 /// Registry of keyboard shortcuts
+#[allow(dead_code)] // Intentionally kept for API completeness
 pub struct ShortcutRegistry {
     /// All bindings, indexed by shortcut
     bindings: HashMap<Shortcut, ShortcutBinding>,
@@ -468,6 +476,7 @@ pub struct ShortcutRegistry {
     customizations: HashMap<String, Option<Shortcut>>,
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl ShortcutRegistry {
     /// Create a new registry with default shortcuts
     pub fn new() -> Self {
@@ -741,6 +750,7 @@ impl CommandPalette {
     }
 
     /// Show the palette
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn show(&mut self) {
         self.visible = true;
         self.query.clear();

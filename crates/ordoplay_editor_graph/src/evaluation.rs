@@ -62,7 +62,7 @@ impl<'a> EvaluationContext<'a> {
     }
 
     /// Get the input value for a port
-    pub fn get_input(&self, node_id: NodeId, port_id: PortId) -> Option<&PortValue> {
+    pub fn get_input(&self, _node_id: NodeId, port_id: PortId) -> Option<&PortValue> {
         // Find the connection to this port
         let connection = self.graph.connections_to(port_id).next()?;
 

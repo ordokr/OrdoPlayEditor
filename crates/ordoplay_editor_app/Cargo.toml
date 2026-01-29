@@ -47,5 +47,19 @@ tokio.workspace = true
 # Image processing
 image.workspace = true
 
+# File watching
+notify.workspace = true
+notify-debouncer-full.workspace = true
+
+# Build system
+walkdir = "2.4"
+
+# Audio (optional - requires Windows SDK on Windows)
+rodio = { version = "0.19", optional = true }
+
+[features]
+default = []
+audio = ["rodio"]
+
 [lints]
 workspace = true

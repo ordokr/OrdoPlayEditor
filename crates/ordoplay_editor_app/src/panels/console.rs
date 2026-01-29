@@ -1,8 +1,120 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Console panel - Log output and command input.
 
+
 use crate::state::EditorState;
 use std::collections::VecDeque;
+use std::sync::mpsc;
+
+/// A tracing event captured by the [`TracingBridge`] layer.
+#[derive(Debug, Clone)]
+pub struct TracingEvent {
+    /// The log level.
+    pub level: LogLevel,
+    /// The formatted message.
+    pub message: String,
+    /// Optional target (module path).
+    pub target: Option<String>,
+    /// Optional file path.
+    pub file: Option<String>,
+    /// Optional line number.
+    pub line: Option<u32>,
+}
+
+/// A `tracing_subscriber::Layer` that forwards events over an `mpsc` channel
+/// so the [`ConsolePanel`] can display them.
+pub struct TracingBridge {
+    sender: mpsc::Sender<TracingEvent>,
+}
+
+impl TracingBridge {
+    /// Create a new bridge and return `(layer, receiver)`.
+    pub fn new() -> (Self, mpsc::Receiver<TracingEvent>) {
+        let (sender, receiver) = mpsc::channel();
+        (Self { sender }, receiver)
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for TracingBridge
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        // Convert tracing level to our LogLevel
+        let level = match *event.metadata().level() {
+            tracing::Level::TRACE => LogLevel::Trace,
+            tracing::Level::DEBUG => LogLevel::Debug,
+            tracing::Level::INFO => LogLevel::Info,
+            tracing::Level::WARN => LogLevel::Warn,
+            tracing::Level::ERROR => LogLevel::Error,
+        };
+
+        // Extract the message using a visitor
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+
+        let message = if visitor.message.is_empty() {
+            "(empty)".to_string()
+        } else {
+            visitor.message
+        };
+
+        let meta = event.metadata();
+        let _ = self.sender.send(TracingEvent {
+            level,
+            message,
+            target: Some(meta.target().to_string()),
+            file: meta.file().map(|s| s.to_string()),
+            line: meta.line(),
+        });
+    }
+}
+
+/// Visitor that extracts the `message` field from a tracing event.
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{:?}", value);
+        } else if self.message.is_empty() {
+            self.message = format!("{} = {:?}", field.name(), value);
+        } else {
+            self.message
+                .push_str(&format!(", {} = {:?}", field.name(), value));
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else if self.message.is_empty() {
+            self.message = format!("{} = {}", field.name(), value);
+        } else {
+            self.message
+                .push_str(&format!(", {} = {}", field.name(), value));
+        }
+    }
+}
+
+/// Format a SystemTime as HH:MM:SS
+fn format_system_time(time: &std::time::SystemTime) -> String {
+    let duration = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    let hours = (secs / 3600) % 24;
+    let minutes = (secs / 60) % 60;
+    let seconds = secs % 60;
+    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+}
 
 /// Log level for filtering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,7 +197,10 @@ pub struct LogEntry {
 }
 
 /// The console panel
+#[allow(dead_code)] // Intentionally kept for API completeness
 pub struct ConsolePanel {
+    /// Receiver for tracing events
+    tracing_rx: Option<mpsc::Receiver<TracingEvent>>,
     /// Log entries
     pub entries: VecDeque<LogEntry>,
     /// Maximum entries to keep
@@ -123,9 +238,16 @@ pub struct ConsolePanel {
 }
 
 impl ConsolePanel {
-    /// Create a new console panel
+    /// Create a new console panel with an optional tracing receiver.
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn new() -> Self {
+        Self::with_tracing_receiver(None)
+    }
+
+    /// Create a new console panel wired to a tracing receiver.
+    pub fn with_tracing_receiver(tracing_rx: Option<mpsc::Receiver<TracingEvent>>) -> Self {
         let mut panel = Self {
+            tracing_rx,
             entries: VecDeque::new(),
             max_entries: 1000,
             min_level: LogLevel::Info,
@@ -191,7 +313,7 @@ impl ConsolePanel {
     }
 
     fn log_internal(&mut self, level: LogLevel, message: String, source: Option<SourceLocation>) {
-        let now = chrono::Local::now();
+        let now = std::time::SystemTime::now();
 
         // Update counts
         match level {
@@ -207,7 +329,7 @@ impl ConsolePanel {
             if let Some(last) = self.entries.back_mut() {
                 if last.level == level && last.message == message {
                     last.count += 1;
-                    last.timestamp = now.format("%H:%M:%S").to_string();
+                    last.timestamp = format_system_time(&now);
                     return;
                 }
             }
@@ -216,7 +338,7 @@ impl ConsolePanel {
         self.entries.push_back(LogEntry {
             level,
             message,
-            timestamp: now.format("%H:%M:%S").to_string(),
+            timestamp: format_system_time(&now),
             source,
             count: 1,
         });
@@ -247,8 +369,39 @@ impl ConsolePanel {
         }
     }
 
+    /// Drain any pending tracing events into the log.
+    pub fn poll_tracing_events(&mut self) {
+        let Some(rx) = &self.tracing_rx else {
+            return;
+        };
+
+        // Drain events into a local buffer to avoid borrow conflict
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        for event in events {
+            let source = match (event.file, event.line) {
+                (Some(file), Some(line)) => Some(SourceLocation {
+                    file,
+                    line,
+                    column: None,
+                }),
+                _ => None,
+            };
+            let message = if let Some(target) = &event.target {
+                format!("[{}] {}", target, event.message)
+            } else {
+                event.message
+            };
+            self.log_internal(event.level, message, source);
+        }
+    }
+
     /// Render the console panel
     pub fn ui(&mut self, ui: &mut egui::Ui, _state: &mut EditorState) {
+        self.poll_tracing_events();
         // Toolbar
         ui.horizontal(|ui| {
             // Clear button
@@ -561,31 +714,7 @@ impl ConsolePanel {
 
 impl Default for ConsolePanel {
     fn default() -> Self {
-        Self::new()
+        Self::with_tracing_receiver(None)
     }
 }
 
-// Add chrono dependency for timestamps
-mod chrono {
-    pub struct Local;
-    impl Local {
-        pub fn now() -> DateTime {
-            DateTime
-        }
-    }
-
-    pub struct DateTime;
-    impl DateTime {
-        pub fn format(&self, _fmt: &str) -> FormattedDateTime {
-            FormattedDateTime
-        }
-    }
-
-    pub struct FormattedDateTime;
-    impl std::fmt::Display for FormattedDateTime {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            // Mock timestamp
-            write!(f, "00:00:00")
-        }
-    }
-}

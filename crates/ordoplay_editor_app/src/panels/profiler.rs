@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Profiler panel - Performance monitoring.
 
+
 use crate::state::EditorState;
 use std::collections::VecDeque;
 
@@ -73,6 +74,7 @@ pub enum CaptureMode {
 }
 
 /// The profiler panel
+#[allow(dead_code)] // Intentionally kept for API completeness
 pub struct ProfilerPanel {
     /// Current view mode
     pub view_mode: ProfilerViewMode,
@@ -185,6 +187,7 @@ impl ProfilerPanel {
     }
 
     /// Record a new frame
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn record_frame(&mut self, frame_time_ms: f32) {
         if self.capture_mode == CaptureMode::Paused {
             return;

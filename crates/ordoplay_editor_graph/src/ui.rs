@@ -65,7 +65,10 @@ pub enum InteractionMode {
     /// Panning the view
     Panning,
     /// Dragging selected nodes
-    DraggingNodes { start_positions: Vec<(NodeId, [f32; 2])> },
+    DraggingNodes {
+        /// Starting positions of nodes being dragged (node ID, position)
+        start_positions: Vec<(NodeId, [f32; 2])>,
+    },
     /// Creating a connection
     CreatingConnection(ConnectionDrag),
     /// Box selection
@@ -677,7 +680,7 @@ impl GraphEditorState {
         &mut self,
         ui: &egui::Ui,
         painter: &egui::Painter,
-        rect: Rect,
+        _rect: Rect,
         node: &Node,
         screen_rect: Rect,
         mouse_pos: Pos2,

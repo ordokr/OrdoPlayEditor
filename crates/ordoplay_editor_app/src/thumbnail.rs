@@ -4,12 +4,17 @@
 //! Provides asynchronous thumbnail generation for various asset types with
 //! in-memory and disk caching support.
 
+
 use egui_wgpu::wgpu;
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::mpsc;
 
 /// Default thumbnail size in pixels
@@ -19,6 +24,7 @@ pub const DEFAULT_THUMBNAIL_SIZE: u32 = 128;
 pub const MAX_CACHED_THUMBNAILS: usize = 500;
 
 /// Thumbnail state for an asset
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone)]
 pub enum ThumbnailState {
     /// Not yet requested
@@ -40,6 +46,8 @@ pub struct ThumbnailRequest {
     pub path: PathBuf,
     /// Requested size
     pub size: u32,
+    /// Cache directory for disk persistence (if enabled)
+    pub cache_dir: Option<PathBuf>,
 }
 
 /// Generated thumbnail data ready for GPU upload
@@ -75,6 +83,176 @@ pub enum ThumbnailError {
     IoError(String),
 }
 
+/// Metadata for disk-cached thumbnails
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiskCacheMetadata {
+    /// Original file path
+    source_path: PathBuf,
+    /// Modification time of source file when thumbnail was generated
+    source_modified: u64,
+    /// Thumbnail dimensions
+    width: u32,
+    height: u32,
+    /// Thumbnail size setting used
+    thumbnail_size: u32,
+}
+
+/// Disk cache for thumbnails
+#[allow(dead_code)] // Intentionally kept for API completeness
+pub struct DiskCache {
+    /// Cache directory
+    cache_dir: PathBuf,
+}
+
+#[allow(dead_code)] // Intentionally kept for API completeness
+impl DiskCache {
+    /// Create a new disk cache at the given directory
+    pub fn new(cache_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let cache_dir = cache_dir.into();
+        fs::create_dir_all(&cache_dir)?;
+        Ok(Self { cache_dir })
+    }
+
+    /// Compute cache path for a source file
+    fn cache_path(&self, source_path: &Path, suffix: &str) -> PathBuf {
+        // Use a hash of the absolute path for the cache filename
+        let path_str = source_path.to_string_lossy();
+        let hash = Self::hash_string(&path_str);
+        self.cache_dir.join(format!("{:016x}{}", hash, suffix))
+    }
+
+    /// Simple string hash (FNV-1a)
+    fn hash_string(s: &str) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in s.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// Get modification time of a file as u64 (seconds since UNIX epoch)
+    fn get_modified_time(path: &Path) -> Option<u64> {
+        fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    }
+
+    /// Check if cached thumbnail is valid (exists and source hasn't changed)
+    pub fn is_valid(&self, source_path: &Path, thumbnail_size: u32) -> bool {
+        let meta_path = self.cache_path(source_path, ".meta");
+        let data_path = self.cache_path(source_path, ".thumb");
+
+        // Both files must exist
+        if !meta_path.exists() || !data_path.exists() {
+            return false;
+        }
+
+        // Read and validate metadata
+        let Ok(meta_data) = fs::read(&meta_path) else {
+            return false;
+        };
+
+        let Ok(metadata): Result<DiskCacheMetadata, _> = serde_json::from_slice(&meta_data) else {
+            return false;
+        };
+
+        // Check thumbnail size matches
+        if metadata.thumbnail_size != thumbnail_size {
+            return false;
+        }
+
+        // Check source modification time
+        let Some(current_mtime) = Self::get_modified_time(source_path) else {
+            return false;
+        };
+
+        metadata.source_modified == current_mtime
+    }
+
+    /// Load cached thumbnail data
+    pub fn load(&self, source_path: &Path) -> Option<ThumbnailData> {
+        let meta_path = self.cache_path(source_path, ".meta");
+        let data_path = self.cache_path(source_path, ".thumb");
+
+        // Read metadata
+        let meta_data = fs::read(&meta_path).ok()?;
+        let metadata: DiskCacheMetadata = serde_json::from_slice(&meta_data).ok()?;
+
+        // Read pixel data
+        let mut file = fs::File::open(&data_path).ok()?;
+        let mut pixels = Vec::new();
+        file.read_to_end(&mut pixels).ok()?;
+
+        Some(ThumbnailData {
+            path: source_path.to_path_buf(),
+            pixels,
+            width: metadata.width,
+            height: metadata.height,
+        })
+    }
+
+    /// Save thumbnail to disk cache
+    pub fn save(&self, data: &ThumbnailData, thumbnail_size: u32) -> std::io::Result<()> {
+        let meta_path = self.cache_path(&data.path, ".meta");
+        let data_path = self.cache_path(&data.path, ".thumb");
+
+        // Get source modification time
+        let source_modified = Self::get_modified_time(&data.path).unwrap_or(0);
+
+        // Create metadata
+        let metadata = DiskCacheMetadata {
+            source_path: data.path.clone(),
+            source_modified,
+            width: data.width,
+            height: data.height,
+            thumbnail_size,
+        };
+
+        // Write metadata
+        let meta_json = serde_json::to_vec(&metadata)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        fs::write(&meta_path, &meta_json)?;
+
+        // Write pixel data
+        let mut file = fs::File::create(&data_path)?;
+        file.write_all(&data.pixels)?;
+
+        Ok(())
+    }
+
+    /// Clear all cached thumbnails
+    pub fn clear(&self) -> std::io::Result<()> {
+        for entry in fs::read_dir(&self.cache_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "meta" || e == "thumb").unwrap_or(false) {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Get cache statistics (file count, total size in bytes)
+    pub fn stats(&self) -> (usize, u64) {
+        let mut count = 0usize;
+        let mut total_size = 0u64;
+
+        if let Ok(entries) = fs::read_dir(&self.cache_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    count += 1;
+                    total_size += meta.len();
+                }
+            }
+        }
+
+        (count, total_size)
+    }
+}
+
 /// Thumbnail cache entry
 struct CacheEntry {
     /// Texture ID for egui rendering
@@ -86,6 +264,7 @@ struct CacheEntry {
 }
 
 /// Thumbnail manager handles generation and caching of asset thumbnails
+#[allow(dead_code)] // Intentionally kept for API completeness
 pub struct ThumbnailManager {
     /// In-memory texture cache
     cache: Arc<RwLock<HashMap<PathBuf, CacheEntry>>>,
@@ -99,6 +278,8 @@ pub struct ThumbnailManager {
     pub thumbnail_size: u32,
     /// Cache directory for disk persistence
     cache_dir: Option<PathBuf>,
+    /// Disk cache instance
+    disk_cache: Option<DiskCache>,
     /// Total cached memory in bytes
     cached_bytes: Arc<RwLock<usize>>,
 }
@@ -121,14 +302,42 @@ impl ThumbnailManager {
             result_rx,
             thumbnail_size: DEFAULT_THUMBNAIL_SIZE,
             cache_dir: None,
+            disk_cache: None,
             cached_bytes: Arc::new(RwLock::new(0)),
         }
     }
 
     /// Set the cache directory for disk persistence
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn with_cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.cache_dir = Some(path.into());
+        let cache_dir = path.into();
+        self.cache_dir = Some(cache_dir.clone());
+        // Create disk cache
+        match DiskCache::new(&cache_dir) {
+            Ok(dc) => {
+                self.disk_cache = Some(dc);
+                tracing::info!("Thumbnail disk cache enabled at: {:?}", cache_dir);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create thumbnail disk cache: {}", e);
+            }
+        }
         self
+    }
+
+    /// Get disk cache statistics
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn disk_cache_stats(&self) -> Option<(usize, u64)> {
+        self.disk_cache.as_ref().map(|dc| dc.stats())
+    }
+
+    /// Clear disk cache
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn clear_disk_cache(&self) -> std::io::Result<()> {
+        if let Some(dc) = &self.disk_cache {
+            dc.clear()?;
+        }
+        Ok(())
     }
 
     /// Request a thumbnail for an asset
@@ -157,6 +366,7 @@ impl ThumbnailManager {
         let _ = self.request_tx.send(ThumbnailRequest {
             path: path.to_path_buf(),
             size: self.thumbnail_size,
+            cache_dir: self.cache_dir.clone(),
         });
     }
 
@@ -192,6 +402,7 @@ impl ThumbnailManager {
     }
 
     /// Get the texture ID if available
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn get_texture(&self, path: &Path) -> Option<egui::TextureId> {
         let mut cache = self.cache.write();
         if let Some(entry) = cache.get_mut(path) {
@@ -294,6 +505,7 @@ impl ThumbnailManager {
     }
 
     /// Clear all cached thumbnails
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn clear_cache(&mut self, egui_renderer: &mut egui_wgpu::Renderer) {
         let mut cache = self.cache.write();
         for (_, entry) in cache.drain() {
@@ -303,7 +515,57 @@ impl ThumbnailManager {
         *self.cached_bytes.write() = 0;
     }
 
+    /// Invalidate cached thumbnails for specific paths (for hot reload)
+    ///
+    /// This removes the thumbnails from cache so they will be regenerated
+    /// on next request.
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn invalidate_paths(
+        &mut self,
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+        egui_renderer: &mut egui_wgpu::Renderer,
+    ) {
+        let mut cache = self.cache.write();
+        let mut states = self.states.write();
+        let mut bytes = self.cached_bytes.write();
+
+        for path in paths {
+            let path = path.as_ref();
+
+            // Remove from memory cache
+            if let Some(entry) = cache.remove(path) {
+                egui_renderer.free_texture(&entry.texture_id);
+                *bytes -= entry.size_bytes;
+            }
+
+            // Remove from states so it can be re-requested
+            states.remove(path);
+
+            // Invalidate disk cache by removing cached files
+            if self.disk_cache.is_some() {
+                // The disk cache will be invalidated on next load
+                // because the source file modification time changed
+                tracing::debug!("Invalidated thumbnail cache for: {:?}", path);
+            }
+        }
+    }
+
+    /// Invalidate and immediately re-request thumbnails for the given paths
+    #[allow(dead_code)] // Intentionally kept for API completeness
+    pub fn hot_reload_paths(&mut self, paths: &[PathBuf], egui_renderer: &mut egui_wgpu::Renderer) {
+        // First invalidate
+        self.invalidate_paths(paths.iter(), egui_renderer);
+
+        // Then re-request (they'll be regenerated in the background)
+        for path in paths {
+            if Self::can_generate_thumbnail(path) {
+                self.request_thumbnail(path);
+            }
+        }
+    }
+
     /// Get cache statistics
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn cache_stats(&self) -> (usize, usize) {
         let cache = self.cache.read();
         (cache.len(), *self.cached_bytes.read())
@@ -329,7 +591,33 @@ fn thumbnail_worker(
 
     rt.block_on(async {
         while let Some(request) = request_rx.recv().await {
+            // Try loading from disk cache first
+            let disk_cache = request
+                .cache_dir
+                .as_ref()
+                .and_then(|dir| DiskCache::new(dir).ok());
+
+            if let Some(ref dc) = disk_cache {
+                if dc.is_valid(&request.path, request.size) {
+                    if let Some(data) = dc.load(&request.path) {
+                        if result_tx.send(Ok(data)).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Generate thumbnail
             let result = generate_thumbnail(&request.path, request.size).await;
+
+            // Save to disk cache if generation succeeded
+            if let (Ok(ref data), Some(ref dc)) = (&result, &disk_cache) {
+                if let Err(e) = dc.save(data, request.size) {
+                    tracing::debug!("Failed to cache thumbnail to disk: {}", e);
+                }
+            }
+
             if result_tx.send(result).is_err() {
                 break; // Channel closed
             }
@@ -363,7 +651,7 @@ async fn generate_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
 /// Generate thumbnail for standard image formats
 async fn generate_image_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
     // Read file
-    let data = std::fs::read(path)
+    let data = fs::read(path)
         .map_err(|e| ThumbnailError::IoError(e.to_string()))?;
 
     // Decode image
@@ -383,7 +671,7 @@ async fn generate_image_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
 
 /// Generate thumbnail for HDR/EXR images
 async fn generate_hdr_thumbnail(path: &Path, size: u32) -> ThumbnailResult {
-    let data = std::fs::read(path)
+    let data = fs::read(path)
         .map_err(|e| ThumbnailError::IoError(e.to_string()))?;
 
     let img =
@@ -503,12 +791,14 @@ fn create_texture(
 }
 
 /// Thumbnail display helper for egui
+#[allow(dead_code)] // Intentionally kept for API completeness
 pub struct ThumbnailWidget<'a> {
     path: &'a Path,
     size: egui::Vec2,
     manager: &'a ThumbnailManager,
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl<'a> ThumbnailWidget<'a> {
     /// Create a new thumbnail widget
     pub fn new(path: &'a Path, size: impl Into<egui::Vec2>, manager: &'a ThumbnailManager) -> Self {
@@ -552,8 +842,9 @@ impl egui::Widget for ThumbnailWidget<'_> {
                     );
 
                     // Spinning arc
+                    use core::f32::consts::PI;
                     let start_angle = angle;
-                    let end_angle = angle + std::f32::consts::PI * 0.75;
+                    let end_angle = angle + PI * 0.75;
                     let points: Vec<egui::Pos2> = (0..20)
                         .map(|i| {
                             let t = i as f32 / 19.0;

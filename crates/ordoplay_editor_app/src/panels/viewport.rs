@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Viewport panel - 3D scene view with gizmos and camera controls.
 
+
 use crate::state::{EditorState, EntityId, SelectMode};
 use crate::tools::{EditorCamera, GizmoMode, GizmoOperation};
 use crate::viewport_renderer::ViewportRenderer;
@@ -15,16 +16,17 @@ pub enum GizmoAxis {
 }
 
 /// Active gizmo drag state
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone)]
 struct GizmoDragState {
     /// Which axis is being dragged
     axis: GizmoAxis,
-    /// Starting entity transform
-    start_transform: crate::state::Transform,
+    /// Starting transforms for all selected entities (entity_id, transform)
+    start_transforms: Vec<(EntityId, crate::state::Transform)>,
     /// Starting mouse position
     start_mouse: egui::Pos2,
-    /// Entity being manipulated
-    entity_id: EntityId,
+    /// Primary entity being manipulated (for gizmo positioning)
+    primary_entity_id: EntityId,
 }
 
 /// The main 3D viewport panel
@@ -32,6 +34,7 @@ pub struct ViewportPanel {
     /// Editor camera
     pub camera: EditorCamera,
     /// Current gizmo operation (if any)
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub gizmo_op: Option<GizmoOperation>,
     /// Render texture handle (will be set up with wgpu)
     render_texture: Option<egui::TextureId>,
@@ -274,7 +277,7 @@ impl ViewportPanel {
         );
     }
 
-    fn draw_overlay(&self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect, state: &EditorState) {
+    fn draw_overlay(&self, _ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect, state: &EditorState) {
         if !self.show_stats {
             return;
         }
@@ -571,55 +574,98 @@ impl ViewportPanel {
                     let delta = current_pos - drag_state.start_mouse;
                     let sensitivity = 0.02 * self.camera.distance;
 
-                    // Calculate new transform based on gizmo mode
-                    let mut new_transform = drag_state.start_transform.clone();
-
-                    match state.gizmo_mode {
+                    // Calculate transform delta based on gizmo mode
+                    let (pos_delta, rot_delta, scale_delta) = match state.gizmo_mode {
                         GizmoMode::Translate => {
+                            let mut d = [0.0, 0.0, 0.0];
                             match drag_state.axis {
-                                GizmoAxis::X => new_transform.position[0] += delta.x * sensitivity,
-                                GizmoAxis::Y => new_transform.position[1] -= delta.y * sensitivity,
-                                GizmoAxis::Z => new_transform.position[2] += (-delta.x + delta.y) * sensitivity * 0.5,
+                                GizmoAxis::X => d[0] = delta.x * sensitivity,
+                                GizmoAxis::Y => d[1] = -delta.y * sensitivity,
+                                GizmoAxis::Z => d[2] = (-delta.x + delta.y) * sensitivity * 0.5,
                             }
+                            // Apply grid snapping if enabled
+                            if state.snap_enabled {
+                                let snap = state.snap_size;
+                                d[0] = (d[0] / snap).round() * snap;
+                                d[1] = (d[1] / snap).round() * snap;
+                                d[2] = (d[2] / snap).round() * snap;
+                            }
+                            (d, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
                         }
                         GizmoMode::Rotate => {
                             let rotation_sensitivity = 0.5;
+                            let mut d = [0.0, 0.0, 0.0];
                             match drag_state.axis {
-                                GizmoAxis::X => new_transform.rotation[0] += delta.y * rotation_sensitivity,
-                                GizmoAxis::Y => new_transform.rotation[1] += delta.x * rotation_sensitivity,
-                                GizmoAxis::Z => new_transform.rotation[2] += (delta.x - delta.y) * rotation_sensitivity * 0.5,
+                                GizmoAxis::X => d[0] = delta.y * rotation_sensitivity,
+                                GizmoAxis::Y => d[1] = delta.x * rotation_sensitivity,
+                                GizmoAxis::Z => d[2] = (delta.x - delta.y) * rotation_sensitivity * 0.5,
                             }
+                            // Apply rotation snapping if enabled (15 degree increments)
+                            if state.snap_enabled {
+                                let snap = state.rotation_snap;
+                                d[0] = (d[0] / snap).round() * snap;
+                                d[1] = (d[1] / snap).round() * snap;
+                                d[2] = (d[2] / snap).round() * snap;
+                            }
+                            ([0.0, 0.0, 0.0], d, [0.0, 0.0, 0.0])
                         }
                         GizmoMode::Scale => {
-                            let scale_delta = (delta.x - delta.y) * 0.01;
+                            let scale_delta_val = (delta.x - delta.y) * 0.01;
+                            let mut d = [0.0, 0.0, 0.0];
                             match drag_state.axis {
-                                GizmoAxis::X => new_transform.scale[0] = (new_transform.scale[0] + scale_delta).max(0.01),
-                                GizmoAxis::Y => new_transform.scale[1] = (new_transform.scale[1] + scale_delta).max(0.01),
-                                GizmoAxis::Z => new_transform.scale[2] = (new_transform.scale[2] + scale_delta).max(0.01),
+                                GizmoAxis::X => d[0] = scale_delta_val,
+                                GizmoAxis::Y => d[1] = scale_delta_val,
+                                GizmoAxis::Z => d[2] = scale_delta_val,
                             }
+                            // Apply scale snapping if enabled
+                            if state.snap_enabled {
+                                let snap = state.scale_snap;
+                                d[0] = (d[0] / snap).round() * snap;
+                                d[1] = (d[1] / snap).round() * snap;
+                                d[2] = (d[2] / snap).round() * snap;
+                            }
+                            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], d)
                         }
-                    }
+                    };
 
-                    // Apply transform (live update)
-                    if let Some(entity_data) = state.scene.get_mut(&drag_state.entity_id) {
-                        entity_data.transform = new_transform;
+                    // Apply transform delta to ALL selected entities
+                    for (entity_id, start_transform) in &drag_state.start_transforms {
+                        if let Some(entity_data) = state.scene.get_mut(entity_id) {
+                            let mut new_transform = start_transform.clone();
+                            // Apply position delta
+                            new_transform.position[0] += pos_delta[0];
+                            new_transform.position[1] += pos_delta[1];
+                            new_transform.position[2] += pos_delta[2];
+                            // Apply rotation delta
+                            new_transform.rotation[0] += rot_delta[0];
+                            new_transform.rotation[1] += rot_delta[1];
+                            new_transform.rotation[2] += rot_delta[2];
+                            // Apply scale delta (additive, clamped to min 0.01)
+                            new_transform.scale[0] = (start_transform.scale[0] + scale_delta[0]).max(0.01);
+                            new_transform.scale[1] = (start_transform.scale[1] + scale_delta[1]).max(0.01);
+                            new_transform.scale[2] = (start_transform.scale[2] + scale_delta[2]).max(0.01);
+                            entity_data.transform = new_transform;
+                        }
                     }
                 }
             } else {
-                // End drag - commit to undo history
-                let entity_id = drag_state.entity_id;
-                let start_transform = drag_state.start_transform.clone();
+                // End drag - commit to undo history for all entities
+                let start_transforms = drag_state.start_transforms.clone();
                 self.gizmo_drag = None;
 
-                if let Some(entity_data) = state.scene.get(&entity_id) {
-                    let new_transform = entity_data.transform.clone();
-                    if new_transform != start_transform {
-                        let description = match state.gizmo_mode {
-                            GizmoMode::Translate => "Move entity",
-                            GizmoMode::Rotate => "Rotate entity",
-                            GizmoMode::Scale => "Scale entity",
-                        };
-                        state.set_transform_with_before(entity_id, start_transform, new_transform, description);
+                let description = match state.gizmo_mode {
+                    GizmoMode::Translate => if start_transforms.len() > 1 { "Move entities" } else { "Move entity" },
+                    GizmoMode::Rotate => if start_transforms.len() > 1 { "Rotate entities" } else { "Rotate entity" },
+                    GizmoMode::Scale => if start_transforms.len() > 1 { "Scale entities" } else { "Scale entity" },
+                };
+
+                // Commit each entity's transform change to undo history
+                for (entity_id, start_transform) in start_transforms {
+                    if let Some(entity_data) = state.scene.get(&entity_id) {
+                        let new_transform = entity_data.transform.clone();
+                        if new_transform != start_transform {
+                            state.set_transform_with_before(entity_id, start_transform, new_transform, description);
+                        }
                     }
                 }
             }
@@ -631,15 +677,22 @@ impl ViewportPanel {
             if let Some(start_pos) = response.hover_pos() {
                 if let Some(gizmo_center) = self.get_gizmo_screen_center(rect, state) {
                     if let Some(axis) = self.hit_test_gizmo(start_pos, gizmo_center) {
-                        if let Some(entity_id) = state.selection.primary().copied() {
-                            if let Some(entity_data) = state.scene.get(&entity_id) {
+                        if let Some(primary_id) = state.selection.primary().copied() {
+                            // Collect starting transforms for ALL selected entities
+                            let start_transforms: Vec<_> = state.selection.entities.iter()
+                                .filter_map(|id| {
+                                    state.scene.get(id).map(|e| (*id, e.transform.clone()))
+                                })
+                                .collect();
+
+                            if !start_transforms.is_empty() {
                                 self.gizmo_drag = Some(GizmoDragState {
                                     axis,
-                                    start_transform: entity_data.transform.clone(),
+                                    start_transforms,
                                     start_mouse: start_pos,
-                                    entity_id,
+                                    primary_entity_id: primary_id,
                                 });
-                                tracing::debug!("Started gizmo drag on {:?} axis", axis);
+                                tracing::debug!("Started gizmo drag on {:?} axis ({} entities)", axis, state.selection.len());
                                 return;
                             }
                         }

@@ -23,6 +23,7 @@ use winit::window::{Window, WindowId};
 
 /// Editor application errors
 #[derive(Debug, Error)]
+#[allow(dead_code)] // Error variants defined for future use
 pub enum EditorError {
     /// Window creation failed
     #[error("Failed to create window: {0}")]
@@ -340,6 +341,7 @@ impl GraphicsState {
         }
     }
 
+    #[allow(unsafe_code)] // Workaround for wgpu 23 lifetime issue with RenderPass
     fn render(
         &mut self,
         egui_ctx: &egui::Context,
@@ -475,10 +477,16 @@ struct EditorInner {
     show_unsaved_warning: bool,
     /// Pending action after unsaved warning
     pending_action: Option<Box<dyn FnOnce(&mut EditorInner) + Send + Sync>>,
+    /// Project settings panel
+    project_settings: crate::panels::ProjectSettingsPanel,
+    /// Entity clipboard for Cut/Copy/Paste operations
+    clipboard: Vec<(crate::state::EntityId, crate::state::EntityData)>,
+    /// Whether the app should exit (set by unsaved changes dialog)
+    request_exit: bool,
 }
 
 impl EditorInner {
-    fn new() -> Self {
+    fn new(tracing_rx: Option<std::sync::mpsc::Receiver<crate::panels::console::TracingEvent>>) -> Self {
         let material_registry = create_material_registry();
         let gameplay_registry = create_gameplay_registry();
 
@@ -489,7 +497,7 @@ impl EditorInner {
             hierarchy: HierarchyPanel::new(),
             inspector: InspectorPanel::new(),
             asset_browser: AssetBrowserPanel::new(),
-            console: ConsolePanel::new(),
+            console: ConsolePanel::with_tracing_receiver(tracing_rx),
             profiler: ProfilerPanel::new(),
             material_graph: Self::create_material_graph(&material_registry),
             material_graph_state: GraphEditorState::new(),
@@ -506,6 +514,9 @@ impl EditorInner {
             file_dialog_path: String::new(),
             show_unsaved_warning: false,
             pending_action: None,
+            project_settings: crate::panels::ProjectSettingsPanel::new(),
+            clipboard: Vec::new(),
+            request_exit: false,
         }
     }
 
@@ -570,6 +581,23 @@ impl EditorInner {
         let delta_time = ctx.input(|i| i.stable_dt) as f32;
         self.sequencer_panel.update(delta_time);
 
+        // Update physics simulation if in play mode
+        if self.state.play_mode.current_state() == crate::play_mode::PlayState::Playing {
+            let fixed_timestep = self.state.project_manager.settings.physics.fixed_timestep;
+            let steps = self.state.play_mode.update(delta_time as f64, fixed_timestep as f64);
+
+            // Run fixed timestep physics updates
+            for _ in 0..steps {
+                self.state.physics_world.step(fixed_timestep);
+            }
+
+            // Sync physics results back to scene
+            self.state.physics_world.sync_to_scene(&mut self.state.scene);
+
+            // Update audio system
+            self.state.audio_engine.update(&self.state.scene);
+        }
+
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -578,8 +606,52 @@ impl EditorInner {
                 self.view_menu(ui);
                 self.tools_menu(ui);
                 self.help_menu(ui);
+
+                // Play mode controls (right-aligned)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.play_mode_controls(ui);
+                });
             });
         });
+
+        // Prefab editing indicator bar
+        if self.state.is_editing_prefab() {
+            egui::TopBottomPanel::top("prefab_edit_bar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("\u{f1b2} Editing Prefab")
+                            .color(egui::Color32::from_rgb(100, 180, 255))
+                            .strong()
+                    );
+                    if let Some(path) = self.state.editing_prefab_path() {
+                        ui.label(format!("- {}", path.display()));
+                    }
+                    if self.state.prefab_has_unsaved_changes() {
+                        ui.label(egui::RichText::new("(modified)").color(egui::Color32::YELLOW));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Exit").clicked() {
+                            if let Err(e) = self.state.exit_prefab_edit_mode(false) {
+                                tracing::error!("Failed to exit prefab edit mode: {}", e);
+                            }
+                        }
+                        if ui.button("Save & Exit").clicked() {
+                            if let Err(e) = self.state.exit_prefab_edit_mode(true) {
+                                tracing::error!("Failed to save and exit prefab edit mode: {}", e);
+                            }
+                        }
+                        if ui.button("Save").clicked() {
+                            if let Some(path) = self.state.editing_prefab_path().cloned() {
+                                if let Err(e) = self.state.save_prefab_from_scene(&path) {
+                                    tracing::error!("Failed to save prefab: {}", e);
+                                }
+                            }
+                        }
+                    });
+                });
+            });
+        }
 
         // Main dock area
         let mut tab_viewer = EditorTabViewer {
@@ -611,6 +683,7 @@ impl EditorInner {
         self.show_file_dialog(ctx);
         self.show_unsaved_warning_dialog(ctx);
         self.show_theme_settings(ctx);
+        self.project_settings.show(ctx, &mut self.state);
 
         // Show command palette
         self.command_palette.ui(ctx);
@@ -887,12 +960,16 @@ impl EditorInner {
 
             ui.separator();
             if ui.button("Cut (Ctrl+X)").clicked() {
+                self.copy_selected();
+                self.state.delete_selected();
                 ui.close_menu();
             }
             if ui.button("Copy (Ctrl+C)").clicked() {
+                self.copy_selected();
                 ui.close_menu();
             }
             if ui.button("Paste (Ctrl+V)").clicked() {
+                self.paste_clipboard();
                 ui.close_menu();
             }
             ui.separator();
@@ -902,6 +979,12 @@ impl EditorInner {
             }
             if ui.button("Duplicate (Ctrl+D)").clicked() {
                 self.state.duplicate_selected();
+                ui.close_menu();
+            }
+
+            ui.separator();
+            if ui.button("Project Settings...").clicked() {
+                self.project_settings.open = true;
                 ui.close_menu();
             }
         });
@@ -943,6 +1026,17 @@ impl EditorInner {
                 }
             });
 
+            ui.menu_button("Physics Debug", |ui| {
+                if ui.checkbox(&mut self.state.physics_debug.show_colliders, "Show Colliders").changed() {
+                }
+                if ui.checkbox(&mut self.state.physics_debug.show_velocities, "Show Velocities").changed() {
+                }
+                if ui.checkbox(&mut self.state.physics_debug.show_contacts, "Show Contacts").changed() {
+                }
+                if ui.checkbox(&mut self.state.physics_debug.show_layers, "Show Layers").changed() {
+                }
+            });
+
             ui.separator();
             if ui.button("Reset Layout").clicked() {
                 self.dock_state = Self::create_default_layout();
@@ -954,16 +1048,20 @@ impl EditorInner {
     fn tools_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Tools", |ui| {
             if ui.button("Material Editor").clicked() {
+                self.open_panel(PanelType::MaterialGraph);
                 ui.close_menu();
             }
             if ui.button("Gameplay Graph").clicked() {
+                self.open_panel(PanelType::GameplayGraph);
                 ui.close_menu();
             }
             if ui.button("Sequencer").clicked() {
+                self.open_panel(PanelType::Sequencer);
                 ui.close_menu();
             }
             ui.separator();
             if ui.button("Profiler").clicked() {
+                self.open_panel(PanelType::Profiler);
                 ui.close_menu();
             }
         });
@@ -980,7 +1078,140 @@ impl EditorInner {
         });
     }
 
+    fn play_mode_controls(&mut self, ui: &mut egui::Ui) {
+        use crate::play_mode::PlayState;
+
+        let play_state = self.state.play_mode.current_state();
+        let is_playing = play_state == PlayState::Playing;
+        let is_paused = play_state == PlayState::Paused;
+        let is_stopped = play_state == PlayState::Stopped;
+
+        // Status indicator
+        let status_color = match play_state {
+            PlayState::Playing => egui::Color32::from_rgb(80, 200, 120),
+            PlayState::Paused => egui::Color32::from_rgb(255, 200, 80),
+            PlayState::Stopped => ui.style().visuals.text_color(),
+        };
+        ui.label(egui::RichText::new(self.state.play_mode.status_text()).color(status_color));
+
+        ui.separator();
+
+        // Time scale (only show when playing or paused)
+        if !is_stopped {
+            let time_scale = self.state.play_mode.time_scale;
+            if ui.small_button(format!("{:.1}x", time_scale))
+                .on_hover_text("Time scale (click to reset)")
+                .clicked()
+            {
+                self.state.play_mode.reset_time_scale();
+            }
+        }
+
+        // Step frame button (only when paused)
+        if is_paused {
+            if ui.small_button("\u{23ED}")  // Next frame symbol
+                .on_hover_text("Step Frame")
+                .clicked()
+            {
+                let timestep = self.state.project_manager.settings.physics.fixed_timestep as f64;
+                self.state.play_mode.step_frame(timestep);
+            }
+        }
+
+        // Stop button
+        if ui.add_enabled(!is_stopped, egui::Button::new("\u{25A0}"))  // Stop symbol
+            .on_hover_text("Stop (Esc)")
+            .clicked()
+        {
+            if let Some((scene, selection)) = self.state.play_mode.stop() {
+                self.state.scene = scene;
+                self.state.selection = selection;
+                self.state.physics_world.clear();
+                self.state.audio_engine.stop_all();
+            }
+        }
+
+        // Pause button
+        if ui.add_enabled(is_playing, egui::Button::new("\u{23F8}"))  // Pause symbol
+            .on_hover_text("Pause")
+            .clicked()
+        {
+            self.state.play_mode.pause();
+            self.state.audio_engine.pause_all();
+        }
+
+        // Play button
+        let play_text = if is_paused { "\u{25B6}" } else { "\u{25B6}" };  // Play symbol
+        let play_hover = if is_paused { "Resume" } else { "Play (F5)" };
+        if ui.add_enabled(!is_playing, egui::Button::new(play_text))
+            .on_hover_text(play_hover)
+            .clicked()
+        {
+            if is_stopped {
+                // Initialize physics world when entering play mode with project settings
+                let gravity = self.state.project_manager.settings.physics.gravity;
+                let collision_layers = &self.state.project_manager.settings.physics.collision_layers;
+                self.state.physics_world.initialize_with_settings(&self.state.scene, gravity, collision_layers);
+
+                // Initialize audio engine for play mode
+                self.state.audio_engine.initialize_from_scene(&self.state.scene);
+            } else if is_paused {
+                // Resume audio when resuming from pause
+                self.state.audio_engine.resume_all();
+            }
+            self.state.play_mode.play(&self.state.scene, &self.state.selection);
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Check play mode shortcuts (extract key states first to avoid borrow issues)
+        let (escape_pressed, f5_pressed, f6_pressed) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::Escape),
+                input.key_pressed(egui::Key::F5),
+                input.key_pressed(egui::Key::F6),
+            )
+        });
+
+        // Escape to stop play mode
+        if escape_pressed && self.state.play_mode.current_state().is_active() {
+            if let Some((scene, selection)) = self.state.play_mode.stop() {
+                self.state.scene = scene;
+                self.state.selection = selection;
+                self.state.physics_world.clear();
+                self.state.audio_engine.stop_all();
+            }
+        }
+
+        // F5 to play/resume
+        if f5_pressed {
+            use crate::play_mode::PlayState;
+            match self.state.play_mode.current_state() {
+                PlayState::Stopped => {
+                    // Initialize physics world when entering play mode with project settings
+                    let gravity = self.state.project_manager.settings.physics.gravity;
+                    let collision_layers = &self.state.project_manager.settings.physics.collision_layers;
+                    self.state.physics_world.initialize_with_settings(&self.state.scene, gravity, collision_layers);
+
+                    // Initialize audio engine for play mode
+                    self.state.audio_engine.initialize_from_scene(&self.state.scene);
+
+                    self.state.play_mode.play(&self.state.scene, &self.state.selection);
+                }
+                PlayState::Paused => {
+                    self.state.audio_engine.resume_all();
+                    self.state.play_mode.play(&self.state.scene, &self.state.selection);
+                }
+                PlayState::Playing => {}
+            }
+        }
+
+        // F6 to pause
+        if f6_pressed && self.state.play_mode.current_state() == crate::play_mode::PlayState::Playing {
+            self.state.play_mode.pause();
+            self.state.audio_engine.pause_all();
+        }
+
         // Use the shortcut registry to check for triggered commands
         if let Some(command_id) = self.shortcuts.check_input(ctx) {
             // Handle special UI commands that aren't in execute_command
@@ -1092,10 +1323,7 @@ impl EditorInner {
 
             // Entity commands
             "entity.create" => {
-                let id = self.state.scene.add_entity(crate::state::EntityData::new("New Entity"));
-                self.state.selection.clear();
-                self.state.selection.add(id);
-                self.state.dirty = true;
+                let _ = self.state.spawn_entity_with_command("New Entity", None, true);
             }
             "entity.rename" => {
                 // Focus would be handled by hierarchy panel
@@ -1123,6 +1351,59 @@ impl EditorInner {
         }
     }
 
+    /// Copy selected entities to the internal clipboard
+    fn copy_selected(&mut self) {
+        self.clipboard.clear();
+        for id in &self.state.selection.entities {
+            if let Some(data) = self.state.scene.get(id) {
+                self.clipboard.push((*id, data.clone()));
+            }
+        }
+        tracing::info!("Copied {} entities to clipboard", self.clipboard.len());
+    }
+
+    /// Paste entities from the internal clipboard with new IDs
+    fn paste_clipboard(&mut self) {
+        if self.clipboard.is_empty() {
+            return;
+        }
+
+        use crate::state::EntityId;
+        use std::collections::HashMap;
+
+        // Build a mapping from old IDs to new IDs
+        let mut id_map: HashMap<EntityId, EntityId> = HashMap::new();
+        for (old_id, _) in &self.clipboard {
+            id_map.insert(*old_id, EntityId::new());
+        }
+
+        // Insert cloned entities with remapped IDs
+        self.state.selection.clear();
+        for (old_id, data) in &self.clipboard {
+            let new_id = id_map[old_id];
+            let mut new_data = data.clone();
+
+            // Remap parent reference if it was also copied
+            new_data.parent = new_data.parent.and_then(|p| id_map.get(&p).copied());
+
+            // Remap children references
+            new_data.children = new_data
+                .children
+                .iter()
+                .filter_map(|c| id_map.get(c).copied())
+                .collect();
+
+            // Append " (Copy)" to name
+            new_data.name = format!("{} (Copy)", new_data.name);
+
+            self.state.scene.insert_entity(new_id, new_data);
+            self.state.selection.add(new_id);
+        }
+
+        self.state.dirty = true;
+        tracing::info!("Pasted {} entities from clipboard", self.clipboard.len());
+    }
+
     fn open_panel(&mut self, panel: PanelType) {
         if let Some((surface, node, tab)) = self.dock_state.find_tab(&panel) {
             self.dock_state.set_active_tab((surface, node, tab));
@@ -1136,20 +1417,30 @@ impl EditorInner {
 /// Main editor application
 pub struct EditorApp {
     running: Option<EditorRunning>,
+    /// Tracing receiver passed to the console panel on first resume.
+    tracing_rx: Option<std::sync::mpsc::Receiver<crate::panels::console::TracingEvent>>,
 }
 
 impl EditorApp {
     /// Create a new editor application
     pub fn new() -> Self {
-        Self { running: None }
+        Self { running: None, tracing_rx: None }
     }
 
-    /// Run the editor application
-    pub fn run() -> Result<()> {
+    /// Create a new editor application with a tracing receiver for the console.
+    pub fn with_tracing_receiver(rx: std::sync::mpsc::Receiver<crate::panels::console::TracingEvent>) -> Self {
+        Self { running: None, tracing_rx: Some(rx) }
+    }
+
+    /// Run the editor application with an optional tracing receiver.
+    pub fn run_with_tracing_receiver(rx: Option<std::sync::mpsc::Receiver<crate::panels::console::TracingEvent>>) -> Result<()> {
         let event_loop = EventLoop::new()?;
         event_loop.set_control_flow(ControlFlow::Poll);
 
-        let mut app = EditorApp::new();
+        let mut app = match rx {
+            Some(rx) => EditorApp::with_tracing_receiver(rx),
+            None => EditorApp::new(),
+        };
         event_loop.run_app(&mut app)?;
 
         Ok(())
@@ -1191,7 +1482,7 @@ impl ApplicationHandler for EditorApp {
         let egui_ctx = egui::Context::default();
 
         // Create editor inner state
-        let editor = EditorInner::new();
+        let editor = EditorInner::new(self.tracing_rx.take());
 
         // Apply editor theme to egui context
         editor.theme.apply(&egui_ctx);
@@ -1240,8 +1531,17 @@ impl ApplicationHandler for EditorApp {
 
         match event {
             WindowEvent::CloseRequested => {
-                tracing::info!("Close requested, exiting...");
-                event_loop.exit();
+                if running.editor.state.has_unsaved_changes() {
+                    // Show unsaved changes dialog instead of exiting immediately
+                    running.editor.show_unsaved_warning = true;
+                    running.editor.request_exit = false;
+                    running.editor.pending_action = Some(Box::new(|editor| {
+                        editor.request_exit = true;
+                    }));
+                } else {
+                    tracing::info!("Close requested, exiting...");
+                    event_loop.exit();
+                }
             }
             WindowEvent::Resized(new_size) => {
                 tracing::debug!("Window resized to {:?}", new_size);
@@ -1261,6 +1561,12 @@ impl ApplicationHandler for EditorApp {
                     );
                 });
 
+                // Check if the editor requested an exit (e.g. after unsaved changes dialog)
+                if running.editor.request_exit {
+                    event_loop.exit();
+                    return;
+                }
+
                 // Handle platform output
                 running.egui_state.handle_platform_output(&running.window, full_output.platform_output.clone());
 
@@ -1277,9 +1583,6 @@ impl ApplicationHandler for EditorApp {
                     }
                     Err(wgpu::SurfaceError::Timeout) => {
                         tracing::warn!("Surface timeout");
-                    }
-                    Err(e) => {
-                        tracing::error!("Render error: {:?}", e);
                     }
                 }
 

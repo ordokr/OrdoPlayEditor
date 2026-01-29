@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Hierarchy panel - Entity tree view.
 
-use crate::state::{EditorState, EntityData, EntityId, SelectMode};
+use crate::state::{EditorState, EntityId, SelectMode};
 use std::collections::HashSet;
 
 /// The hierarchy panel showing the entity tree
@@ -16,6 +16,8 @@ pub struct HierarchyPanel {
     renaming: Option<EntityId>,
     /// Rename buffer
     rename_buffer: String,
+    /// Currently dragged entity (for reparenting)
+    dragging_entity: Option<EntityId>,
 }
 
 impl HierarchyPanel {
@@ -27,6 +29,7 @@ impl HierarchyPanel {
             expanded: HashSet::new(),
             renaming: None,
             rename_buffer: String::new(),
+            dragging_entity: None,
         }
     }
 
@@ -64,6 +67,34 @@ impl HierarchyPanel {
 
         // Entity tree
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(dragging) = self.dragging_entity {
+                let sources = self.drag_sources(state, dragging);
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 20.0),
+                    egui::Sense::hover(),
+                );
+                let dropped = response.hovered() && ui.input(|i| i.pointer.any_released());
+                if dropped {
+                    state.reparent_entities_with_command(&sources, None);
+                    self.dragging_entity = None;
+                }
+
+                let fill = egui::Color32::from_rgba_unmultiplied(40, 120, 200, 28);
+                let stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(70));
+                ui.painter().rect_filled(rect, 4.0, fill);
+                ui.painter().rect_stroke(rect, 4.0, stroke);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Drop To Root",
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    ui.style().visuals.text_color(),
+                );
+                response.on_hover_text("Drop here to unparent (move to root)");
+
+                ui.add_space(4.0);
+            }
+
             // Get root entities from scene
             let roots = state.scene.root_entities();
 
@@ -77,6 +108,10 @@ impl HierarchyPanel {
                 }
             }
         });
+
+        if ui.input(|i| i.pointer.any_released()) {
+            self.dragging_entity = None;
+        }
     }
 
     fn render_node(&mut self, ui: &mut egui::Ui, entity_id: EntityId, state: &mut EditorState, depth: usize) {
@@ -130,10 +165,19 @@ impl HierarchyPanel {
             // Visibility toggle (based on active flag)
             let vis_icon = if entity.active { "O" } else { "-" };
             if ui.small_button(vis_icon).on_hover_text("Toggle Active").clicked() {
-                if let Some(e) = state.scene.get_mut(&entity_id) {
-                    e.active = !e.active;
-                    state.dirty = true;
-                }
+                state.set_entity_active(entity_id, !entity.active);
+            }
+
+            // Prefab indicator
+            let is_prefab_root = state.prefab_manager.is_prefab_root(entity_id);
+            let is_prefab_child = state.prefab_manager.is_prefab_entity(entity_id) && !is_prefab_root;
+
+            if is_prefab_root {
+                ui.label(egui::RichText::new("\u{f1b2}").color(egui::Color32::from_rgb(100, 180, 255)))
+                    .on_hover_text("Prefab Instance (root)");
+            } else if is_prefab_child {
+                ui.label(egui::RichText::new("\u{f0c1}").color(egui::Color32::from_rgb(100, 180, 255).gamma_multiply(0.6)))
+                    .on_hover_text("Prefab Instance (child)");
             }
 
             // Entity name (selectable)
@@ -172,6 +216,37 @@ impl HierarchyPanel {
                 response
             };
 
+            if response.drag_started() {
+                self.dragging_entity = Some(entity_id);
+            }
+
+            if let Some(dragging) = self.dragging_entity {
+                let dropped = response.hovered() && ui.input(|i| i.pointer.any_released());
+                if dropped && dragging != entity_id {
+                    let sources = self.drag_sources(state, dragging);
+                    if !self.is_invalid_drop(state, &sources, entity_id) {
+                        state.reparent_entities_with_command(&sources, Some(entity_id));
+                    }
+                    self.dragging_entity = None;
+                }
+
+                if response.hovered() && dragging != entity_id {
+                    let sources = self.drag_sources(state, dragging);
+                    let invalid = self.is_invalid_drop(state, &sources, entity_id);
+                    let fill = if invalid {
+                        egui::Color32::from_rgba_unmultiplied(180, 60, 60, 35)
+                    } else {
+                        egui::Color32::from_rgba_unmultiplied(60, 180, 90, 35)
+                    };
+                    ui.painter().rect_filled(response.rect, 4.0, fill);
+                    response.clone().on_hover_text(if invalid {
+                        "Cannot parent to self or descendant"
+                    } else {
+                        "Drop to reparent"
+                    });
+                }
+            }
+
             // Handle selection
             if response.clicked() {
                 let modifiers = ui.input(|i| i.modifiers);
@@ -206,6 +281,41 @@ impl HierarchyPanel {
                     self.create_child_entity(state, entity_id);
                     ui.close_menu();
                 }
+
+                // Prefab options
+                ui.separator();
+                if is_prefab_root {
+                    if ui.button("Open Prefab").clicked() {
+                        if let Some(instance) = state.prefab_manager.get_instance(entity_id) {
+                            let path = instance.prefab_path.clone();
+                            if let Err(e) = state.enter_prefab_edit_mode(&path) {
+                                tracing::error!("Failed to open prefab: {}", e);
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Select Prefab Asset").clicked() {
+                        if let Some(instance) = state.prefab_manager.get_instance(entity_id) {
+                            state.selected_asset = Some(instance.prefab_path.clone());
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Unpack Prefab").clicked() {
+                        state.unpack_prefab(entity_id);
+                        ui.close_menu();
+                    }
+                    if ui.button("Unpack Prefab Completely").clicked() {
+                        state.unpack_prefab_completely(entity_id);
+                        ui.close_menu();
+                    }
+                } else if !is_prefab_child {
+                    // Only show "Create Prefab" for non-prefab entities
+                    if ui.button("Create Prefab...").clicked() {
+                        state.show_create_prefab_dialog = Some(entity_id);
+                        ui.close_menu();
+                    }
+                }
             });
         });
 
@@ -218,32 +328,42 @@ impl HierarchyPanel {
         }
     }
 
+    fn drag_sources(&self, state: &EditorState, dragged: EntityId) -> Vec<EntityId> {
+        if state.selection.contains(&dragged) {
+            state.selection.entities.clone()
+        } else {
+            vec![dragged]
+        }
+    }
+
+    fn is_invalid_drop(
+        &self,
+        state: &EditorState,
+        sources: &[EntityId],
+        target: EntityId,
+    ) -> bool {
+        if sources.contains(&target) {
+            return true;
+        }
+        let descendants = state.collect_with_descendants(sources);
+        descendants.contains(&target)
+    }
+
     fn create_entity(&mut self, state: &mut EditorState) {
-        let entity_id = state.scene.add_entity(EntityData::new("New Entity"));
+        let Some(entity_id) = state.spawn_entity_with_command("New Entity", None, true) else {
+            return;
+        };
 
-        // Select the new entity
-        state.selection.clear();
-        state.selection.add(entity_id);
-
-        // Start renaming immediately
         self.renaming = Some(entity_id);
         self.rename_buffer = "New Entity".to_string();
 
-        state.dirty = true;
         tracing::info!("Created entity {:?}", entity_id);
     }
 
     fn create_child_entity(&mut self, state: &mut EditorState, parent_id: EntityId) {
-        let child_id = state.scene.add_entity(EntityData {
-            name: "New Child".to_string(),
-            parent: Some(parent_id),
-            ..Default::default()
-        });
-
-        // Add child to parent's children list
-        if let Some(parent) = state.scene.get_mut(&parent_id) {
-            parent.children.push(child_id);
-        }
+        let Some(child_id) = state.spawn_entity_with_command("New Child", Some(parent_id), true) else {
+            return;
+        };
 
         // Expand the parent
         self.expanded.insert(parent_id);
@@ -256,7 +376,6 @@ impl HierarchyPanel {
         self.renaming = Some(child_id);
         self.rename_buffer = "New Child".to_string();
 
-        state.dirty = true;
         tracing::info!("Created child entity {:?} under {:?}", child_id, parent_id);
     }
 

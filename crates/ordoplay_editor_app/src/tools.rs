@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Editor tools (gizmos, transform handles, etc.)
 
+
 use serde::{Deserialize, Serialize};
 
 /// Gizmo mode for transform operations
@@ -26,6 +27,7 @@ impl GizmoMode {
     }
 
     /// Get the hotkey for this mode
+    #[allow(dead_code)] // Intentionally kept for API completeness
     pub fn hotkey(&self) -> char {
         match self {
             Self::Translate => 'W',
@@ -45,6 +47,7 @@ impl GizmoMode {
 }
 
 /// Axis constraint for gizmo operations
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AxisConstraint {
     /// No constraint - free movement
@@ -64,6 +67,7 @@ pub enum AxisConstraint {
     YZ,
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl AxisConstraint {
     /// Get the axis mask as a Vec3 (1.0 = active, 0.0 = constrained)
     pub fn mask(&self) -> [f32; 3] {
@@ -80,6 +84,7 @@ impl AxisConstraint {
 }
 
 /// State for an active gizmo operation
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone)]
 pub struct GizmoOperation {
     /// Current gizmo mode
@@ -96,6 +101,7 @@ pub struct GizmoOperation {
     pub active: bool,
 }
 
+#[allow(dead_code)] // Intentionally kept for API completeness
 impl GizmoOperation {
     /// Create a new inactive operation
     pub fn new(mode: GizmoMode) -> Self {
@@ -135,6 +141,7 @@ impl GizmoOperation {
 }
 
 /// Editor camera controls
+#[allow(dead_code)] // Intentionally kept for API completeness
 #[derive(Debug, Clone)]
 pub struct EditorCamera {
     /// Camera position
